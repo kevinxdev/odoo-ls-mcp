@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -362,8 +363,13 @@ async def test_run_parse_workspace_config_mode(tmp_path, mock_binary):
         out_path.write_bytes(output_json)
         return mock_proc
 
-    with patch("asyncio.create_subprocess_exec", new=fake_exec):
-        result = await run_parse(workspace=workspace, config_path=config)
+    env = {k: v for k, v in os.environ.items() if k != "ODOO_LS_PATH"}
+    with patch.dict(os.environ, env, clear=True):
+        with patch(
+            "odoo_ls_mcp.config.shutil.which", return_value="/usr/bin/odoo_ls_server"
+        ):
+            with patch("asyncio.create_subprocess_exec", new=fake_exec):
+                result = await run_parse(workspace=workspace, config_path=config)
 
     assert len(result.diagnostics) == 3
     assert result.workspace == str(workspace.resolve())
