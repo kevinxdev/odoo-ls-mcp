@@ -50,6 +50,7 @@ RESTART_BACKOFF_BASE = 2.0  # seconds; doubled each attempt
 
 # ── LSP message framing ──────────────────────────────────────────────────────
 
+
 def encode_message(payload: dict[str, Any]) -> bytes:
     """Encode a JSON-RPC payload as an LSP Content-Length framed message."""
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -97,6 +98,7 @@ async def read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
 
 # ── Session state ────────────────────────────────────────────────────────────
 
+
 class SessionState(Enum):
     STOPPED = auto()
     STARTING = auto()
@@ -118,6 +120,7 @@ class IndexingProgress:
 
 
 # ── LSP Session ──────────────────────────────────────────────────────────────
+
 
 class LspSession:
     """
@@ -202,20 +205,14 @@ class LspSession:
             )
         except (FileNotFoundError, PermissionError) as exc:
             self._state = SessionState.FAILED
-            raise FileNotFoundError(
-                f"Failed to spawn '{cmd[0]}': {exc}"
-            ) from exc
+            raise FileNotFoundError(f"Failed to spawn '{cmd[0]}': {exc}") from exc
 
         self._state = SessionState.INITIALIZING
 
         # Start reader loop
-        self._reader_task = asyncio.create_task(
-            self._reader_loop(), name="lsp-reader"
-        )
+        self._reader_task = asyncio.create_task(self._reader_loop(), name="lsp-reader")
         # Start stderr drain (prevent blocking)
-        asyncio.create_task(
-            self._stderr_drain(), name="lsp-stderr"
-        )
+        asyncio.create_task(self._stderr_drain(), name="lsp-stderr")
 
         # LSP initialize handshake
         try:
@@ -245,7 +242,9 @@ class LspSession:
         if self._proc and self._proc.returncode is None:
             try:
                 # LSP shutdown request
-                await asyncio.wait_for(self._request("shutdown", {}), timeout=SHUTDOWN_TIMEOUT)
+                await asyncio.wait_for(
+                    self._request("shutdown", {}), timeout=SHUTDOWN_TIMEOUT
+                )
                 # LSP exit notification
                 self._notify("exit", {})
                 # Wait for process
@@ -310,16 +309,17 @@ class LspSession:
         """Send an LSP request and await the response."""
         if not self.is_ready:
             raise RuntimeError(
-                f"LSP session not ready (state={self._state.name}). "
-                "Call start() first."
+                f"LSP session not ready (state={self._state.name}). Call start() first."
             )
-        return await asyncio.wait_for(
-            self._request(method, params), timeout=timeout
-        )
+        return await asyncio.wait_for(self._request(method, params), timeout=timeout)
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Send an LSP notification (fire-and-forget)."""
         self._notify(method, params)
+
+    def on_notification(self, method: str, handler: Callable[[dict], None]) -> None:
+        """Register a handler for LSP push notifications with the given method."""
+        self._notification_handlers.setdefault(method, []).append(handler)
 
     # ── High-level LSP helpers ────────────────────────────────────────────────
 
@@ -327,14 +327,17 @@ class LspSession:
         """Send textDocument/didOpen for a file."""
         text = path.read_text(encoding="utf-8", errors="replace")
         lang = _lang_id(path)
-        self._notify("textDocument/didOpen", {
-            "textDocument": {
-                "uri": path.as_uri(),
-                "languageId": lang,
-                "version": 1,
-                "text": text,
-            }
-        })
+        self._notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": path.as_uri(),
+                    "languageId": lang,
+                    "version": 1,
+                    "text": text,
+                }
+            },
+        )
 
     async def hover(
         self, path: Path, line: int, character: int, timeout: float = REQUEST_TIMEOUT
@@ -472,7 +475,9 @@ class LspSession:
                 line = await self._proc.stderr.readline()
                 if not line:
                     break
-                logger.debug("[odoo_ls stderr] %s", line.decode(errors="replace").rstrip())
+                logger.debug(
+                    "[odoo_ls stderr] %s", line.decode(errors="replace").rstrip()
+                )
         except asyncio.CancelledError:
             pass
 
@@ -532,17 +537,23 @@ class LspSession:
                 r = d.get("range", {})
                 s = r.get("start", {})
                 e = r.get("end", {})
-                parsed.append(Diagnostic(
-                    file=uri[7:] if uri.startswith("file://") else uri,
-                    range=Range(
-                        start=Position(line=s.get("line", 0), character=s.get("character", 0)),
-                        end=Position(line=e.get("line", 0), character=e.get("character", 0)),
-                    ),
-                    severity=d.get("severity", DiagnosticSeverity.ERROR),
-                    code=d.get("code"),
-                    source=d.get("source"),
-                    message=d.get("message", ""),
-                ))
+                parsed.append(
+                    Diagnostic(
+                        file=uri[7:] if uri.startswith("file://") else uri,
+                        range=Range(
+                            start=Position(
+                                line=s.get("line", 0), character=s.get("character", 0)
+                            ),
+                            end=Position(
+                                line=e.get("line", 0), character=e.get("character", 0)
+                            ),
+                        ),
+                        severity=d.get("severity", DiagnosticSeverity.ERROR),
+                        code=d.get("code"),
+                        source=d.get("source"),
+                        message=d.get("message", ""),
+                    )
+                )
             except Exception as exc:
                 logger.debug("Skipping malformed diagnostic: %s", exc)
         self._diagnostics[uri] = parsed
@@ -592,32 +603,35 @@ class LspSession:
 
     async def _initialize(self) -> None:
         """Perform the LSP initialize + initialized handshake."""
-        result = await self._request("initialize", {
-            "processId": os.getpid(),
-            "clientInfo": {"name": "odoo-ls-mcp", "version": "0.1.0"},
-            "rootUri": self.workspace.as_uri(),
-            "workspaceFolders": [
-                {"uri": self.workspace.as_uri(), "name": self.workspace.name}
-            ],
-            "capabilities": {
-                "workspace": {
-                    "workDoneProgress": True,
-                },
-                "textDocument": {
-                    "hover": {"contentFormat": ["plaintext", "markdown"]},
-                    "definition": {"linkSupport": False},
-                    "completion": {
-                        "completionItem": {"snippetSupport": False},
+        result = await self._request(
+            "initialize",
+            {
+                "processId": os.getpid(),
+                "clientInfo": {"name": "odoo-ls-mcp", "version": "0.1.0"},
+                "rootUri": self.workspace.as_uri(),
+                "workspaceFolders": [
+                    {"uri": self.workspace.as_uri(), "name": self.workspace.name}
+                ],
+                "capabilities": {
+                    "workspace": {
+                        "workDoneProgress": True,
                     },
-                    "publishDiagnostics": {
-                        "relatedInformation": False,
+                    "textDocument": {
+                        "hover": {"contentFormat": ["plaintext", "markdown"]},
+                        "definition": {"linkSupport": False},
+                        "completion": {
+                            "completionItem": {"snippetSupport": False},
+                        },
+                        "publishDiagnostics": {
+                            "relatedInformation": False,
+                        },
                     },
-                },
-                "window": {
-                    "workDoneProgress": True,
+                    "window": {
+                        "workDoneProgress": True,
+                    },
                 },
             },
-        })
+        )
         logger.debug("LSP server capabilities: %s", result.get("capabilities", {}))
         # Send initialized notification to complete handshake
         self._notify("initialized", {})
@@ -673,6 +687,7 @@ class LspSession:
 
 # ── Session registry (singleton per workspace) ────────────────────────────────
 
+
 class SessionRegistry:
     """
     Global registry of LspSession instances, keyed by workspace path.
@@ -723,7 +738,9 @@ class SessionRegistry:
             await session.stop()
         self._sessions.clear()
 
-    async def restart(self, workspace: Path, config_path: Path | None = None) -> LspSession:
+    async def restart(
+        self, workspace: Path, config_path: Path | None = None
+    ) -> LspSession:
         """Force-restart the session for a workspace."""
         workspace = workspace.resolve()
         async with self._locks.get(workspace, asyncio.Lock()):
@@ -734,10 +751,7 @@ class SessionRegistry:
 
     def status(self) -> dict[str, str]:
         """Return {workspace_path: state_name} for all sessions."""
-        return {
-            str(ws): s.state.name
-            for ws, s in self._sessions.items()
-        }
+        return {str(ws): s.state.name for ws, s in self._sessions.items()}
 
 
 # Module-level registry singleton
@@ -749,6 +763,7 @@ def get_registry() -> SessionRegistry:
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
+
 
 def _lang_id(path: Path) -> str:
     suffix = path.suffix.lower()

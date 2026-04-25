@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from .config import WorkspaceConfig
@@ -107,6 +108,11 @@ class LspClient:
         """
         if self._session is not None:
             self._session.notify(method, params)
+
+    def on_notification(self, method: str, handler: Callable[[dict], None]) -> None:
+        """Register a handler for LSP push notifications with the given method."""
+        if self._session is not None:
+            self._session.on_notification(method, handler)
 
     # ── State ─────────────────────────────────────────────────────────────────
 
