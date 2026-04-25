@@ -1,24 +1,21 @@
-# OpenCode Integration Guide
+# How-to Guide: OpenCode Integration
 
-This guide explains how to integrate the `odoo-ls-mcp` server with OpenCode to provide Odoo-specific intelligence to your AI agents.
+This guide shows you how to integrate `odoo-ls-mcp` with OpenCode to empower your AI agents with Odoo-specific code intelligence.
 
-## Installation
+## Prerequisites
 
-Ensure you have the Odoo Language Server (`odoo_ls_server`) installed and accessible.
+1.  **OdooLS Server**: Ensure `odoo_ls_server` is installed.
+    ```bash
+    odoo_ls_server --version  # Should return v1.3.1 or similar
+    ```
+2.  **odoo-ls-mcp**: Clone and sync the repository as described in the [README](../README.md).
 
-```bash
-# Recommended: install into a local virtual environment
-cd ~/Development/odoo-ls-mcp
-uv sync
-```
+## Step 1: Register the MCP Server
 
-## OpenCode Registration
+OpenCode manages MCP servers through `~/.config/opencode/opencode.json`. You need to add `odoo-ls` to the `mcp` object.
 
-OpenCode uses a central configuration file at `~/.config/opencode/opencode.json`. To register the OdooLS MCP server, add an entry to the `mcp` object.
-
-### Registration Snippet
-
-Copy and paste the following into your `opencode.json`:
+1.  Open `~/.config/opencode/opencode.json` in your editor.
+2.  Add the following configuration:
 
 ```json
 {
@@ -35,51 +32,46 @@ Copy and paste the following into your `opencode.json`:
 }
 ```
 
-## Environment Variables
+3.  **Restart OpenCode** (or the current session) to apply the changes.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ODOO_LS_PATH` | Path to the `odoo_ls_server` binary. | `odoo_ls_server` (from PATH) |
+## Step 2: Verify the Connection
 
-## Workspace Configuration
+Once registered, you can verify the server is working by calling the `check_odools_available` tool.
 
-The OdooLS server requires an `odools.toml` file at your workspace root (e.g., `/home/kevin/Development/Odoo/athenrix-docker-base/odools.toml`).
+**Example Request:**
+> "Use the odoo-ls MCP server to check if it's available."
 
-Example `odools.toml`:
-
-```toml
-[[config]]
-odoo_path = "/home/kevin/Development/Odoo/athenrix-docker-base/odoo/custom/src/odoo"
-addons_paths = ["$autoDetectAddons"]
+**Expected Result:**
+```text
+✅ odoo_ls_server found at: /home/kevin/.local/bin/odoo_ls_server
+odoo_ls_server 1.3.1
 ```
 
-## Tool Reference
+## Step 3: Run Your First Analysis
 
-| Tool | Purpose |
-|------|---------|
-| `check_odools_available` | Verifies binary and version info. |
-| `list_odools_config` | Locates and previews `odools.toml`. |
-| `inspect_workspace_config` | Displays the resolved configuration. |
-| `parse_diagnostics` | Runs one-shot static analysis. |
-| `start_session` | Initializes a live LSP session (required for navigation). |
-| `hover` | Gets type/docs at a specific position. |
-| `go_to_definition` | Finds symbol definitions. |
-| `find_references` | Finds all usages of a symbol. |
-| `document_symbols` | Lists symbols in a specific file. |
-| `workspace_symbols` | Searches symbols across the workspace. |
-| `lookup_model` | Fast grep-based model finder. |
-| `lookup_xmlid` | Fast grep-based XML ID finder. |
-| `session_health` | Reports health of active sessions. |
+To get diagnostics for your Odoo workspace, use the `parse_diagnostics` tool.
+
+**Example Request:**
+> "Run diagnostics on the workspace at /home/kevin/Development/Odoo/athenrix-docker-base"
+
+**Tool Output:**
+The server will return a formatted list of warnings and errors found in your Odoo addons, such as missing dependencies, XML ID mismatches, or Python linting issues.
+
+## FAQ
+
+### Why am I getting "No odools.toml found"?
+OdooLS requires a configuration file to know where the Odoo source and addons are. Ensure an `odools.toml` exists in your workspace root. You can use `list_odools_config` to see which configs the server can find.
+
+### How do I use Go-to-Definition?
+1.  First, call `start_session(workspace="/your/path")`. This starts a live LSP process.
+2.  Then, use `go_to_definition(workspace="/your/path", file_path="/your/file.py", line=10, character=5)`.
+3.  The tool will return the exact file and position where the symbol is defined.
+
+### Can I change the session timeout?
+Yes. Set the `ODOO_LS_IDLE_TTL` environment variable in your `opencode.json` configuration. The default is 300 seconds (5 minutes).
 
 ## Troubleshooting
 
-- **Server fails to start:** Verify the `command` path in `opencode.json` points to the correct executable in your `.venv`.
-- **No diagnostics/navigation:** Ensure `odools.toml` is present and `odoo_path` is correct.
-- **Tools not visible:** Check OpenCode logs to ensure the MCP server was loaded without errors.
-
-## Scope Limits
-
-- **Navigation and Diagnostics only:** This integration focuses on reading and understanding code.
-- **No Refactoring:** `rename` and `code actions` are not currently supported.
-- **No Formatting:** Use existing repository `invoke lint` tasks for formatting.
-- **LSP Support:** Limited to the capabilities provided by `odoo_ls_server`.
+- **Server Timeout**: If your workspace is very large, initial indexing might take several minutes. Use `session_health` to check if indexing is still in progress.
+- **Path Issues**: Always use **absolute paths** for `command` and `environment` variables in `opencode.json`.
+- **Logs**: Check OpenCode's logs for any error messages emitted by the MCP server to its stderr.
