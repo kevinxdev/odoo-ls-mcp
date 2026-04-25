@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "odoo-ls": {
+      "type": "local",
+      "command": [
+        "/home/kevin/Development/odoo-ls-mcp/.venv/bin/odoo-ls-mcp"
+      ],
+      "environment": {
+        "ODOO_LS_PATH": "/home/kevin/.local/bin/odoo_ls_server"
+      },
+      "enabled": true
+    }
+  }
+}

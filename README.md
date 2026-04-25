@@ -15,64 +15,77 @@ MCP tools callable by Claude, Cursor, Copilot, and other MCP-aware agents.
 ## Installation
 
 ```bash
-uv pip install odoo-ls-mcp
-# or from source:
+# Clone the repository
 git clone https://github.com/your-org/odoo-ls-mcp
 cd odoo-ls-mcp
+
+# Install dependencies and create virtual environment
 uv sync
 ```
 
-## Usage
+## OpenCode Registration
 
-### As an MCP server (stdio)
-
-Add to your MCP client config (e.g. `~/.config/opencode/config.json`):
+To use this server with OpenCode, add the following to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "mcpServers": {
+  "mcp": {
     "odoo-ls": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/odoo-ls-mcp", "odoo-ls-mcp"]
+      "type": "local",
+      "command": ["/home/kevin/Development/odoo-ls-mcp/.venv/bin/odoo-ls-mcp"],
+      "environment": {
+        "ODOO_LS_PATH": "/home/kevin/.local/bin/odoo_ls_server"
+      },
+      "enabled": true
     }
   }
 }
 ```
 
-### Available Tools
+See [docs/opencode-integration.md](docs/opencode-integration.md) for a detailed integration guide.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ODOO_LS_PATH` | Path to the `odoo_ls_server` binary. |
+
+## Workspace Configuration
+
+Ensure an `odools.toml` exists in your workspace root.
+
+```toml
+[[config]]
+odoo_path = "/path/to/odoo/source"
+addons_paths = ["$autoDetectAddons"]
+```
+
+## Tool Reference
 
 | Tool | Description |
 |------|-------------|
-| `check_odools_available` | Verify OdooLS is installed and return version info |
-| `list_odools_config` | Find and preview `odools.toml` files from a path |
-| `parse_diagnostics` | Run one-shot static analysis on an Odoo workspace |
+| `check_odools_available` | Verify OdooLS environment. |
+| `list_odools_config` | Find upward `odools.toml` files. |
+| `inspect_workspace_config` | Display resolved settings. |
+| `parse_diagnostics` | One-shot static analysis. |
+| `start_session` | Start live LSP session (for navigation). |
+| `hover` | Get hover info at position. |
+| `go_to_definition` | Jump to symbol definition. |
+| `find_references` | Find symbol usages. |
+| `lookup_model` | Fast model finder. |
+| `lookup_xmlid` | Fast XML ID finder. |
 
-### Example: run diagnostics on a workspace
+## Troubleshooting
 
-```
-check_odools_available()
-parse_diagnostics(workspace="/path/to/my-odoo-project", min_severity=2)
-```
+- Verify `ODOO_LS_PATH` points to the correct binary.
+- Check that the `.venv` path in your MCP config is absolute and correct.
+- Ensure your `odools.toml` has a valid `odoo_path`.
 
-## Architecture
+## Scope Limits
 
-### v1 (current) — `--parse` mode
-
-```
-Agent (Claude/Cursor)
-  └─ MCP stdio transport
-       └─ odoo-ls-mcp FastMCP server
-            └─ asyncio subprocess: odoo_ls_server --parse <workspace>
-                 └─ JSON diagnostics → parsed → returned as text
-```
-
-No long-lived process. Each `parse_diagnostics` call spawns and waits for
-`odoo_ls_server`, then exits.
-
-### v1.1 (planned) — live LSP session
-
-Long-lived `odoo_ls_server` subprocess with full LSP initialize handshake,
-enabling hover, go-to-definition, completions, and live diagnostics.
+- Navigation and diagnostics only.
+- No renaming or code actions.
+- No formatting support.
 
 ## Development
 
