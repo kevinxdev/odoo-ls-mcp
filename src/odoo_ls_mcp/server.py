@@ -54,6 +54,7 @@ mcp = FastMCP(
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
+
 def _fmt_hover(result: dict | None) -> str:
     if result is None:
         return "No hover information available at this position."
@@ -114,14 +115,27 @@ def _fmt_completions(items: list[dict]) -> str:
 
 
 _COMPLETION_KIND = {
-    1: "Text", 2: "Method", 3: "Function", 4: "Constructor",
-    5: "Field", 6: "Variable", 7: "Class", 8: "Interface",
-    9: "Module", 10: "Property", 14: "Keyword", 15: "Snippet",
-    17: "Color", 18: "File", 19: "Reference", 21: "Folder",
+    1: "Text",
+    2: "Method",
+    3: "Function",
+    4: "Constructor",
+    5: "Field",
+    6: "Variable",
+    7: "Class",
+    8: "Interface",
+    9: "Module",
+    10: "Property",
+    14: "Keyword",
+    15: "Snippet",
+    17: "Color",
+    18: "File",
+    19: "Reference",
+    21: "Folder",
 }
 
 
 # ── Tool: check_odools_available ─────────────────────────────────────────────
+
 
 @mcp.tool(
     name="check_odools_available",
@@ -134,6 +148,7 @@ _COMPLETION_KIND = {
 async def check_odools_available() -> str:
     """Verify that odoo_ls_server is installed and reachable."""
     import shutil
+
     binary = shutil.which("odoo_ls_server")
     if binary is None:
         return (
@@ -143,7 +158,8 @@ async def check_odools_available() -> str:
         )
     try:
         proc = await asyncio.create_subprocess_exec(
-            binary, "--version",
+            binary,
+            "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
@@ -160,6 +176,7 @@ async def check_odools_available() -> str:
 
 # ── Tool: list_odools_config ──────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="list_odools_config",
     description=(
@@ -171,7 +188,9 @@ async def check_odools_available() -> str:
 async def list_odools_config(
     start_path: Annotated[
         str,
-        Field(description="Directory to start searching from (typically your workspace root)."),
+        Field(
+            description="Directory to start searching from (typically your workspace root)."
+        ),
     ],
 ) -> str:
     path = Path(start_path).resolve()
@@ -199,11 +218,14 @@ async def list_odools_config(
             "OdooLS will not analyse this workspace without a config file.\n"
             "Create an odools.toml in your workspace root with at minimum:\n\n"
             "  [[config]]\n"
-            "  odoo_path = \"/path/to/odoo\"\n"
-            "  addons_paths = [\"$autoDetectAddons\"]"
+            '  odoo_path = "/path/to/odoo"\n'
+            '  addons_paths = ["$autoDetectAddons"]'
         )
 
-    lines = [f"📋 Found {len(found)} odools.toml file(s) searching from: {start_path}", ""]
+    lines = [
+        f"📋 Found {len(found)} odools.toml file(s) searching from: {start_path}",
+        "",
+    ]
     for i, p in enumerate(found):
         prefix = "✅ (nearest — active)" if i == 0 else f"  (ancestor #{i})"
         lines.append(f"{prefix}: {p}")
@@ -222,6 +244,7 @@ async def list_odools_config(
 
 # ── Tool: parse_diagnostics ───────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="parse_diagnostics",
     description=(
@@ -238,17 +261,28 @@ async def parse_diagnostics(
     ],
     config_path: Annotated[
         str | None,
-        Field(default=None, description="Optional absolute path to an odools.toml config file."),
+        Field(
+            default=None,
+            description="Optional absolute path to an odools.toml config file.",
+        ),
     ] = None,
     timeout: Annotated[
         float,
-        Field(default=DEFAULT_PARSE_TIMEOUT_S, ge=5, le=600,
-              description="Seconds to wait. Large workspaces may need 120–300 s."),
+        Field(
+            default=DEFAULT_PARSE_TIMEOUT_S,
+            ge=5,
+            le=600,
+            description="Seconds to wait. Large workspaces may need 120–300 s.",
+        ),
     ] = DEFAULT_PARSE_TIMEOUT_S,
     min_severity: Annotated[
         int,
-        Field(default=DiagnosticSeverity.WARNING, ge=1, le=4,
-              description="1=error only, 2=warning+error, 3=info+, 4=all. Default: 2."),
+        Field(
+            default=DiagnosticSeverity.WARNING,
+            ge=1,
+            le=4,
+            description="1=error only, 2=warning+error, 3=info+, 4=all. Default: 2.",
+        ),
     ] = DiagnosticSeverity.WARNING,
 ) -> str:
     try:
@@ -271,6 +305,7 @@ async def parse_diagnostics(
 
 
 # ── Tool: start_session ───────────────────────────────────────────────────────
+
 
 @mcp.tool(
     name="start_session",
@@ -297,8 +332,12 @@ async def start_session(
     ] = True,
     indexing_timeout: Annotated[
         float,
-        Field(default=INDEXING_READY_TIMEOUT, ge=10, le=600,
-              description="Max seconds to wait for indexing. Default: 120."),
+        Field(
+            default=INDEXING_READY_TIMEOUT,
+            ge=10,
+            le=600,
+            description="Max seconds to wait for indexing. Default: 120.",
+        ),
     ] = INDEXING_READY_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
@@ -320,18 +359,19 @@ async def start_session(
 
     if wait_for_indexing:
         indexed = await session.wait_for_indexing(timeout=indexing_timeout)
-        status = "✅ Ready (indexing complete)" if indexed else "⚠️ Ready (indexing still in progress)"
+        status = (
+            "✅ Ready (indexing complete)"
+            if indexed
+            else "⚠️ Ready (indexing still in progress)"
+        )
     else:
         status = f"✅ Session started (state={session.state.name})"
 
-    return (
-        f"{status}\n"
-        f"  Workspace: {ws}\n"
-        f"  State:     {session.state.name}"
-    )
+    return f"{status}\n  Workspace: {ws}\n  State:     {session.state.name}"
 
 
 # ── Tool: get_live_diagnostics ────────────────────────────────────────────────
+
 
 @mcp.tool(
     name="get_live_diagnostics",
@@ -353,13 +393,21 @@ async def get_live_diagnostics(
     ] = None,
     min_severity: Annotated[
         int,
-        Field(default=DiagnosticSeverity.WARNING, ge=1, le=4,
-              description="1=error only, 2=warning+error, 3=info+, 4=all. Default: 2."),
+        Field(
+            default=DiagnosticSeverity.WARNING,
+            ge=1,
+            le=4,
+            description="1=error only, 2=warning+error, 3=info+, 4=all. Default: 2.",
+        ),
     ] = DiagnosticSeverity.WARNING,
     wait_seconds: Annotated[
         float,
-        Field(default=3.0, ge=0, le=30,
-              description="Seconds to wait for fresh diagnostics after opening a file."),
+        Field(
+            default=3.0,
+            ge=0,
+            le=30,
+            description="Seconds to wait for fresh diagnostics after opening a file.",
+        ),
     ] = 3.0,
 ) -> str:
     ws = Path(workspace).resolve()
@@ -367,10 +415,7 @@ async def get_live_diagnostics(
     session = await registry.get(ws)
 
     if session is None or not session.is_ready:
-        return (
-            "⚠️ No active session for this workspace.\n"
-            "Call start_session first."
-        )
+        return "⚠️ No active session for this workspace.\nCall start_session first."
 
     # Optionally open a specific file to trigger diagnostics
     if file_path:
@@ -425,6 +470,7 @@ async def get_live_diagnostics(
 
 # ── Tool: hover ───────────────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="hover",
     description=(
@@ -434,11 +480,15 @@ async def get_live_diagnostics(
     ),
 )
 async def hover(
-    workspace: Annotated[str, Field(description="Absolute path to the Odoo workspace root.")],
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
-    timeout: Annotated[float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)] = REQUEST_TIMEOUT,
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
     fp = Path(file_path).resolve()
@@ -464,6 +514,7 @@ async def hover(
 
 # ── Tool: go_to_definition ────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="go_to_definition",
     description=(
@@ -473,11 +524,15 @@ async def hover(
     ),
 )
 async def go_to_definition(
-    workspace: Annotated[str, Field(description="Absolute path to the Odoo workspace root.")],
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
-    timeout: Annotated[float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)] = REQUEST_TIMEOUT,
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
     fp = Path(file_path).resolve()
@@ -503,6 +558,7 @@ async def go_to_definition(
 
 # ── Tool: completions ─────────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="completions",
     description=(
@@ -512,11 +568,15 @@ async def go_to_definition(
     ),
 )
 async def completions(
-    workspace: Annotated[str, Field(description="Absolute path to the Odoo workspace root.")],
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
-    timeout: Annotated[float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)] = REQUEST_TIMEOUT,
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
     fp = Path(file_path).resolve()
@@ -542,6 +602,7 @@ async def completions(
 
 # ── Tool: indexing_status ─────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="indexing_status",
     description=(
@@ -559,9 +620,15 @@ async def indexing_status() -> str:
 
     lines = [f"📊 Active OdooLS sessions ({len(status)}):"]
     for ws_path, state_name in status.items():
-        icon = {"READY": "✅", "INDEXING": "⏳", "STARTING": "🔄",
-                "INITIALIZING": "🔄", "FAILED": "❌", "STOPPED": "⏹️",
-                "SHUTTING_DOWN": "⏹️"}.get(state_name, "•")
+        icon = {
+            "READY": "✅",
+            "INDEXING": "⏳",
+            "STARTING": "🔄",
+            "INITIALIZING": "🔄",
+            "FAILED": "❌",
+            "STOPPED": "⏹️",
+            "SHUTTING_DOWN": "⏹️",
+        }.get(state_name, "•")
         lines.append(f"  {icon} {ws_path}  [{state_name}]")
 
         # Show active progress tokens
@@ -577,6 +644,7 @@ async def indexing_status() -> str:
 
 # ── Tool: restart_server ──────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="restart_server",
     description=(
@@ -587,14 +655,21 @@ async def indexing_status() -> str:
     ),
 )
 async def restart_server(
-    workspace: Annotated[str, Field(description="Absolute path to the Odoo workspace root.")],
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
     config_path: Annotated[
         str | None,
-        Field(default=None, description="Optional new config path to use after restart."),
+        Field(
+            default=None, description="Optional new config path to use after restart."
+        ),
     ] = None,
     wait_for_indexing: Annotated[
         bool,
-        Field(default=False, description="Wait for indexing after restart. Default: False."),
+        Field(
+            default=False,
+            description="Wait for indexing after restart. Default: False.",
+        ),
     ] = False,
 ) -> str:
     ws = Path(workspace).resolve()
@@ -622,6 +697,7 @@ async def restart_server(
 
 # ── Tool: stop_session ────────────────────────────────────────────────────────
 
+
 @mcp.tool(
     name="stop_session",
     description=(
@@ -630,7 +706,9 @@ async def restart_server(
     ),
 )
 async def stop_session(
-    workspace: Annotated[str, Field(description="Absolute path to the Odoo workspace root.")],
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
 ) -> str:
     ws = Path(workspace).resolve()
     registry = get_registry()
@@ -644,6 +722,7 @@ async def stop_session(
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     mcp.run()  # defaults to stdio transport

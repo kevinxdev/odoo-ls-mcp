@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
 from odoo_ls_mcp.config import WorkspaceConfig
 from odoo_ls_mcp.lsp_client import LspClient
 from odoo_ls_mcp.session import OdooLsSessionManager
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

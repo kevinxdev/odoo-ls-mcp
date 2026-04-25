@@ -35,6 +35,9 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: tests that require odoo_ls_server binary on PATH",
+]
 testpaths = ["tests"]
 
 [tool.ruff.lint.isort]

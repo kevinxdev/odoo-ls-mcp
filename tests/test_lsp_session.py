@@ -26,6 +26,7 @@ from odoo_ls_mcp.lsp_session import (
 
 # ── Unit: message framing ─────────────────────────────────────────────────────
 
+
 def test_encode_message_roundtrip():
     payload = {"jsonrpc": "2.0", "method": "initialize", "params": {}}
     encoded = encode_message(payload)
@@ -41,7 +42,7 @@ def test_encode_message_content_length_accurate():
     encoded = encode_message(payload)
     header_end = encoded.index(b"\r\n\r\n")
     header = encoded[:header_end].decode()
-    body = encoded[header_end + 4:]
+    body = encoded[header_end + 4 :]
     content_length = int(header.split(":")[1].strip())
     assert content_length == len(body)
 
@@ -217,6 +218,7 @@ async def session(tmp_path: Path, fake_server_path: Path) -> LspSession:
 
 # ── Session tests ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_session_starts_and_becomes_ready(session: LspSession):
     assert session.is_ready
@@ -292,6 +294,7 @@ async def test_session_state_after_failure(tmp_path: Path):
 
 
 # ── Registry tests ────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_registry_returns_same_session(tmp_path: Path, fake_server_path: Path):

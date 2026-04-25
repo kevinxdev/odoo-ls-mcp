@@ -13,15 +13,12 @@ IMPORTANT: stdout is NEVER touched here; all log output → stderr via logging.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import sys
 from collections.abc import Callable
 from typing import Any
 
 from .config import WorkspaceConfig
-from .lsp_session import LspSession, SessionState
+from .lsp_session import LspSession
 
 logger = logging.getLogger(__name__)
 
