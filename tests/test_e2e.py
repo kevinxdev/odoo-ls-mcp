@@ -22,7 +22,6 @@ Run:
 from __future__ import annotations
 
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -89,14 +88,16 @@ def server_params() -> StdioServerParameters:
 # ---------------------------------------------------------------------------
 
 
-async def _call(session: ClientSession, tool: str, args: dict | None = None) -> str:
+async def _call(
+    session: ClientSession, tool: str, args: dict[str, object] | None = None
+) -> str:
     """Call a tool and return the first text content as a string."""
     result = await session.call_tool(tool, arguments=args or {})
     assert result.content, f"Tool '{tool}' returned empty content"
     first = result.content[0]
-    # MCP text content has a .text attribute
-    if hasattr(first, "text"):
-        return first.text
+    text = getattr(first, "text", None)
+    if isinstance(text, str):
+        return text
     return str(first)
 
 

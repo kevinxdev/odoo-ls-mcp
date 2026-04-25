@@ -4,12 +4,11 @@ import asyncio
 import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from odoo_ls_mcp.lsp_session import (
-    INITIALIZE_TIMEOUT,
     LspSession,
     SessionRegistry,
     SessionState,
@@ -120,6 +119,7 @@ async def test_crash_recovery_creates_fresh_session(
     await sess.start()
     assert sess.is_ready
 
+    assert sess._proc is not None
     sess._proc.kill()
     await asyncio.sleep(0.3)
     assert sess.state == SessionState.FAILED

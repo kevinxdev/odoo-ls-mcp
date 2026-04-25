@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +10,6 @@ from odoo_ls_mcp.server import (
     lookup_xmlid,
     session_health,
 )
-
 
 # ── session_health ────────────────────────────────────────────────────────────
 
