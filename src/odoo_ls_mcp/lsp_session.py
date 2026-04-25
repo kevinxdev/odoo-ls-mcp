@@ -49,6 +49,7 @@ SHUTDOWN_TIMEOUT = 10.0
 # Crash recovery
 MAX_RESTART_ATTEMPTS = 3
 RESTART_BACKOFF_BASE = 2.0  # seconds; doubled each attempt
+IDLE_TTL_DEFAULT = 1800.0
 
 
 # ── LSP message framing ──────────────────────────────────────────────────────
@@ -802,6 +803,102 @@ class SessionRegistry:
         self._locks: dict[SessionKey, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self._config_mtimes: dict[SessionKey, float | None] = {}
+        self._last_used: dict[SessionKey, float] = {}
+        self._idle_ttl = self._resolve_idle_ttl()
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    @staticmethod
+    def _resolve_idle_ttl() -> float:
+        raw_ttl = os.environ.get("ODOO_LS_IDLE_TTL")
+        if raw_ttl is None:
+            return IDLE_TTL_DEFAULT
+        try:
+            ttl = float(raw_ttl)
+        except ValueError:
+            logger.warning(
+                "Invalid ODOO_LS_IDLE_TTL=%r; falling back to %.0fs",
+                raw_ttl,
+                IDLE_TTL_DEFAULT,
+            )
+            return IDLE_TTL_DEFAULT
+        if ttl <= 0:
+            logger.warning(
+                "Non-positive ODOO_LS_IDLE_TTL=%r; falling back to %.0fs",
+                raw_ttl,
+                IDLE_TTL_DEFAULT,
+            )
+            return IDLE_TTL_DEFAULT
+        return ttl
+
+    def _touch(self, key: SessionKey) -> None:
+        self._last_used[key] = time.monotonic()
+
+    def _ensure_cleanup_task(self) -> None:
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(
+                self._cleanup_idle_sessions(),
+                name="lsp-session-idle-cleanup",
+            )
+
+    async def _cleanup_idle_sessions(self) -> None:
+        interval = min(max(self._idle_ttl / 2, 0.1), 60.0)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                now = time.monotonic()
+                expired: list[SessionKey] = []
+
+                async with self._global_lock:
+                    for key in list(self._sessions):
+                        last_used = self._last_used.get(key)
+                        if last_used is None:
+                            self._touch(key)
+                            continue
+                        if now - last_used > self._idle_ttl:
+                            expired.append(key)
+
+                for key in expired:
+                    lock = await self._ensure_lock(*key)
+                    async with lock:
+                        session = self._sessions.get(key)
+                        last_used = self._last_used.get(key)
+                        if session is None or last_used is None:
+                            continue
+                        idle_for = now - last_used
+                        if idle_for <= self._idle_ttl:
+                            continue
+
+                        self._sessions.pop(key, None)
+                        self._config_mtimes.pop(key, None)
+                        self._last_used.pop(key, None)
+                        logger.info(
+                            "Idle TTL (%.0fs) expired for session %s, stopping",
+                            self._idle_ttl,
+                            key,
+                        )
+                        try:
+                            await session.stop()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Error stopping idle session %s: %s", key, exc
+                            )
+
+                async with self._global_lock:
+                    if not self._sessions:
+                        self._cleanup_task = None
+                        return
+        except asyncio.CancelledError:
+            raise
+
+    async def _cancel_cleanup_task(self) -> None:
+        task = self._cleanup_task
+        self._cleanup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     @staticmethod
     def _session_key(workspace: Path, config_path: Path | None = None) -> SessionKey:
@@ -838,8 +935,12 @@ class SessionRegistry:
                         workspace,
                     )
                     await session.stop()
+                    self._sessions.pop(key, None)
+                    self._config_mtimes.pop(key, None)
+                    self._last_used.pop(key, None)
                     session = None
                 else:
+                    self._touch(key)
                     return session
 
             if session is not None and not session.is_ready:
@@ -849,10 +950,15 @@ class SessionRegistry:
                     workspace,
                 )
                 await session.stop()
+                self._sessions.pop(key, None)
+                self._config_mtimes.pop(key, None)
+                self._last_used.pop(key, None)
 
             session = LspSession(workspace=workspace, config_path=config_path)
             self._sessions[key] = session
             self._config_mtimes[key] = _get_mtime(config_path)
+            self._touch(key)
+            self._ensure_cleanup_task()
             await session.start()
             return session
 
@@ -878,6 +984,7 @@ class SessionRegistry:
 
     async def stop_all(self) -> None:
         """Shut down all active sessions."""
+        await self._cancel_cleanup_task()
         for session in list(self._sessions.values()):
             try:
                 await session.stop()
@@ -885,6 +992,7 @@ class SessionRegistry:
                 logger.warning("Error stopping session during stop_all: %s", exc)
         self._sessions.clear()
         self._config_mtimes.clear()
+        self._last_used.clear()
 
     async def restart(
         self, workspace: Path, config_path: Path | None = None
@@ -897,6 +1005,7 @@ class SessionRegistry:
         async with lock:
             existing = self._sessions.pop(key, None)
             self._config_mtimes.pop(key, None)
+            self._last_used.pop(key, None)
             if existing:
                 await existing.stop()
         return await self.get_or_create(workspace, config_path)

@@ -49,7 +49,7 @@ To register this server in OpenCode, add the following entry to your `~/.config/
 |----------|-------------|---------|
 | `ODOO_LS_PATH` | Absolute path to the `odoo_ls_server` binary. | `odoo_ls_server` (from PATH) |
 | `ODOO_LS_LOG_LEVEL` | Log level for the MCP server (DEBUG, INFO, WARNING, ERROR). | `WARNING` |
-| `ODOO_LS_IDLE_TTL` | Seconds to keep an idle OdooLS session alive before shutdown. | `300` |
+| `ODOO_LS_IDLE_TTL` | Seconds to keep an idle OdooLS session alive before shutdown. | `1800` |
 | `ODOO_LS_PREVIEW_LENGTH` | Character limit for docstring/hover previews. | `120` |
 | `ODOO_LS_WORKSPACE_ROOT` | Default workspace root if not provided in tool calls. | None |
 | `ODOO_LS_CONFIG_PATH` | Explicit path to `odools.toml` to override auto-discovery. | None |
@@ -82,6 +82,33 @@ Example `odools.toml` from `/home/kevin/Development/Odoo/athenrix-docker-base/od
 [[config]]
 odoo_path = "/home/kevin/Development/Odoo/athenrix-docker-base/odoo/custom/src/odoo"
 addons_paths = ["$autoDetectAddons"]
+```
+
+## Usage
+
+Typical flow: verify OdooLS, start a workspace session, then use navigation and lookup tools against the same workspace.
+
+1. `check_odools_available` → confirm `odoo_ls_server` is installed.
+2. `start_session` with workspace `/home/kevin/Development/Odoo/athenrix-docker-base`.
+3. `hover` to inspect the symbol under the cursor.
+4. `go_to_definition` to jump to the symbol's definition.
+5. `find_references` to list all usages.
+6. `lookup_model` to locate an Odoo model such as `sale.order`.
+7. `lookup_xmlid` to resolve an XML ID such as `sale.action_orders`.
+
+```text
+check_odools_available()
+start_session(workspace="/home/kevin/Development/Odoo/athenrix-docker-base")
+hover(
+  workspace="/home/kevin/Development/Odoo/athenrix-docker-base",
+  file_path="/home/kevin/Development/Odoo/athenrix-docker-base/odoo/custom/src/private/my_addon/models/example.py",
+  line=12,
+  character=8,
+)
+go_to_definition(...same workspace/file/position...)
+find_references(...same workspace/file/position...)
+lookup_model(workspace="/home/kevin/Development/Odoo/athenrix-docker-base", model="sale.order")
+lookup_xmlid(workspace="/home/kevin/Development/Odoo/athenrix-docker-base", xmlid="sale.action_orders")
 ```
 
 ## Troubleshooting

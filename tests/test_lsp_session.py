@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import textwrap
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -197,7 +198,9 @@ async def fake_server_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-async def session(tmp_path: Path, fake_server_path: Path) -> LspSession:
+async def session(
+    tmp_path: Path, fake_server_path: Path
+) -> AsyncGenerator[LspSession, None]:
     """An LspSession backed by the fake LSP server."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -304,7 +307,7 @@ async def test_registry_returns_same_session(tmp_path: Path, fake_server_path: P
     registry = SessionRegistry()
 
     # Patch session creation to use fake server
-    async def patched_get_or_create(ws, cfg=None):
+    async def patched_get_or_create(ws: Path, cfg: Path | None = None) -> LspSession:
         sess = LspSession(workspace=ws, binary=sys.executable)
         sess._build_command = lambda: [sys.executable, str(fake_server_path)]
         registry._sessions[registry._session_key(ws)] = sess
@@ -353,7 +356,7 @@ async def test_registry_distinguishes_config_paths(
     registry = SessionRegistry()
     original_start = LspSession.start
 
-    async def patched_start(self):
+    async def patched_start(self: LspSession) -> None:
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
@@ -364,4 +367,64 @@ async def test_registry_distinguishes_config_paths(
     assert sess_a is not sess_b
     assert await registry.get(workspace, config_a) is sess_a
     assert await registry.get(workspace, config_b) is sess_b
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_registry_evicts_idle_sessions(
+    tmp_path: Path, fake_server_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "ws_ttl"
+    workspace.mkdir()
+    monkeypatch.setenv("ODOO_LS_IDLE_TTL", "0.2")
+
+    registry = SessionRegistry()
+    original_start = LspSession.start
+
+    async def patched_start(self: LspSession) -> None:
+        self._build_command = lambda: [sys.executable, str(fake_server_path)]
+        await original_start(self)
+
+    with patch.object(LspSession, "start", patched_start):
+        session = await registry.get_or_create(workspace)
+        await session.wait_for_indexing(timeout=5.0)
+        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.2)
+
+        assert await registry.get(workspace) is None
+        assert session.state == SessionState.STOPPED
+
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_registry_refreshes_last_used_on_get_or_create(
+    tmp_path: Path, fake_server_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "ws_ttl_touch"
+    workspace.mkdir()
+    monkeypatch.setenv("ODOO_LS_IDLE_TTL", "0.3")
+
+    registry = SessionRegistry()
+    original_start = LspSession.start
+
+    async def patched_start(self: LspSession) -> None:
+        self._build_command = lambda: [sys.executable, str(fake_server_path)]
+        await original_start(self)
+
+    with patch.object(LspSession, "start", patched_start):
+        session = await registry.get_or_create(workspace)
+        await session.wait_for_indexing(timeout=5.0)
+        await asyncio.sleep(0.15)
+
+        same_session = await registry.get_or_create(workspace)
+        assert same_session is session
+
+        await asyncio.sleep(0.2)
+        assert await registry.get(workspace) is session
+
+        await asyncio.sleep(0.25)
+        assert await registry.get(workspace) is None
+        assert session.state == SessionState.STOPPED
+
     await registry.stop_all()
