@@ -12,6 +12,7 @@ Run via:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import sys
 from pathlib import Path
@@ -39,6 +40,18 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _atexit_shutdown() -> None:
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(get_registry().stop_all())
+        loop.close()
+    except Exception:
+        pass
+
+
+atexit.register(_atexit_shutdown)
 
 mcp = FastMCP(
     name="odoo-ls-mcp",

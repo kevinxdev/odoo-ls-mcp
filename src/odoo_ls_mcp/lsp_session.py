@@ -739,6 +739,15 @@ class LspSession:
 # ── Session registry (singleton per workspace) ────────────────────────────────
 
 
+def _get_mtime(path: Path | None) -> float | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 class SessionRegistry:
     """
     Global registry of LspSession instances, keyed by workspace path.
@@ -750,6 +759,13 @@ class SessionRegistry:
         self._sessions: dict[Path, LspSession] = {}
         self._locks: dict[Path, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+        self._config_mtimes: dict[Path, float | None] = {}
+
+    async def _ensure_lock(self, workspace: Path) -> asyncio.Lock:
+        async with self._global_lock:
+            if workspace not in self._locks:
+                self._locks[workspace] = asyncio.Lock()
+            return self._locks[workspace]
 
     async def get_or_create(
         self,
@@ -757,25 +773,35 @@ class SessionRegistry:
         config_path: Path | None = None,
     ) -> LspSession:
         workspace = workspace.resolve()
+        lock = await self._ensure_lock(workspace)
 
-        async with self._global_lock:
-            if workspace not in self._locks:
-                self._locks[workspace] = asyncio.Lock()
-
-        async with self._locks[workspace]:
+        async with lock:
             session = self._sessions.get(workspace)
 
-            # If session exists and is healthy, return it
             if session is not None and session.is_ready:
-                return session
+                current_mtime = _get_mtime(config_path)
+                stored_mtime = self._config_mtimes.get(workspace)
+                if current_mtime is not None and current_mtime != stored_mtime:
+                    logger.info(
+                        "odools.toml mtime changed — restarting stale session for %s",
+                        workspace,
+                    )
+                    await session.stop()
+                    session = None
+                else:
+                    return session
 
-            # If session crashed or never started, (re)create
-            if session is not None and session.state == SessionState.FAILED:
-                logger.info("Restarting failed LSP session for %s", workspace)
+            if session is not None and not session.is_ready:
+                logger.info(
+                    "Replacing non-ready LSP session (state=%s) for %s",
+                    session.state.name,
+                    workspace,
+                )
                 await session.stop()
 
             session = LspSession(workspace=workspace, config_path=config_path)
             self._sessions[workspace] = session
+            self._config_mtimes[workspace] = _get_mtime(config_path)
             await session.start()
             return session
 
@@ -786,16 +812,22 @@ class SessionRegistry:
     async def stop_all(self) -> None:
         """Shut down all active sessions."""
         for session in list(self._sessions.values()):
-            await session.stop()
+            try:
+                await session.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Error stopping session during stop_all: %s", exc)
         self._sessions.clear()
+        self._config_mtimes.clear()
 
     async def restart(
         self, workspace: Path, config_path: Path | None = None
     ) -> LspSession:
         """Force-restart the session for a workspace."""
         workspace = workspace.resolve()
-        async with self._locks.get(workspace, asyncio.Lock()):
+        lock = await self._ensure_lock(workspace)
+        async with lock:
             existing = self._sessions.pop(workspace, None)
+            self._config_mtimes.pop(workspace, None)
             if existing:
                 await existing.stop()
         return await self.get_or_create(workspace, config_path)
