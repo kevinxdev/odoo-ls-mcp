@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -32,6 +33,8 @@ from typing import Any
 from .models import Diagnostic, DiagnosticSeverity, Position, Range
 
 logger = logging.getLogger(__name__)
+
+SessionKey = tuple[Path, Path | None]
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -138,14 +141,15 @@ class LspSession:
         self.workspace = workspace.resolve()
         self.config_path = config_path.resolve() if config_path else None
         self.binary = binary or shutil.which(ODOOLS_BINARY)
+        self._selected_profile = _resolve_selected_profile(self.config_path)
 
         self._proc: asyncio.subprocess.Process | None = None
-        self._reader_task: asyncio.Task | None = None
+        self._reader_task: asyncio.Task[None] | None = None
         self._state = SessionState.STOPPED
         self._state_lock = asyncio.Lock()
 
         # request id → Future[response]
-        self._pending: dict[int | str, asyncio.Future] = {}
+        self._pending: dict[int | str, asyncio.Future[Any]] = {}
         self._next_id = 1
 
         # Diagnostics cache: file URI → list[Diagnostic]
@@ -157,7 +161,9 @@ class LspSession:
         self._indexing_done_event = asyncio.Event()
 
         # Notification callbacks
-        self._notification_handlers: dict[str, list[Callable]] = {}
+        self._notification_handlers: dict[
+            str, list[Callable[[dict[str, Any]], None]]
+        ] = {}
 
         # Restart tracking
         self._restart_count = 0
@@ -250,7 +256,9 @@ class LspSession:
                 # Wait for process
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
             except Exception:
-                pass
+                logger.exception(
+                    "Error while stopping LSP session (workspace=%s)", self.workspace
+                )
             finally:
                 await self._kill()
 
@@ -317,7 +325,9 @@ class LspSession:
         """Send an LSP notification (fire-and-forget)."""
         self._notify(method, params)
 
-    def on_notification(self, method: str, handler: Callable[[dict], None]) -> None:
+    def on_notification(
+        self, method: str, handler: Callable[[dict[str, Any]], None]
+    ) -> None:
         """Register a handler for LSP push notifications with the given method."""
         self._notification_handlers.setdefault(method, []).append(handler)
 
@@ -325,7 +335,9 @@ class LspSession:
 
     async def open_document(self, path: Path) -> None:
         """Send textDocument/didOpen for a file."""
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = await asyncio.to_thread(
+            path.read_text, encoding="utf-8", errors="replace"
+        )
         lang = _lang_id(path)
         self._notify(
             "textDocument/didOpen",
@@ -466,12 +478,13 @@ class LspSession:
     # ── Internal: subprocess management ─────────────────────────────────────
 
     def _build_command(self) -> list[str]:
-        cmd = [self.binary]  # type: ignore[list-item]
+        assert self.binary is not None
+        cmd = [self.binary]
         if self.config_path:
             cmd += ["--config-path", str(self.config_path)]
         # PID watchdog: tell OdooLS to exit if we die (Unix only)
         if sys.platform != "win32":
-            cmd += ["--clientProcessId", str(os.getpid())]
+            cmd += ["--client-process-id", str(os.getpid())]
         return cmd
 
     async def _kill(self) -> None:
@@ -482,7 +495,9 @@ class LspSession:
                 self._proc.kill()
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
         except Exception:
-            pass
+            logger.exception(
+                "Failed to kill LSP subprocess (workspace=%s)", self.workspace
+            )
 
     # ── Internal: reader loop ────────────────────────────────────────────────
 
@@ -562,6 +577,10 @@ class LspSession:
         elif method == "window/workDoneProgress/create":
             # Respond to server-side progress token registration
             self._respond(msg_id, {})
+        elif method == "client/registerCapability":
+            self._respond(msg_id, None)
+        elif method == "workspace/configuration":
+            self._respond(msg_id, [{"selectedProfile": self._selected_profile}])
         elif method == "window/logMessage":
             level = msg.get("params", {}).get("type", 3)
             text = msg.get("params", {}).get("message", "")
@@ -615,6 +634,9 @@ class LspSession:
         token = params.get("token")
         value = params.get("value", {})
         kind = value.get("kind")
+
+        if not isinstance(token, str | int):
+            return
 
         if kind == "begin":
             prog = IndexingProgress(
@@ -695,7 +717,7 @@ class LspSession:
         self._next_id += 1
 
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[Any] = loop.create_future()
         self._pending[req_id] = fut
 
         payload = {
@@ -748,6 +770,26 @@ def _get_mtime(path: Path | None) -> float | None:
         return None
 
 
+def _resolve_selected_profile(config_path: Path | None) -> str:
+    if config_path is None or not config_path.exists():
+        return "default"
+    try:
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to read selected profile from %s: %s", config_path, exc)
+        return "default"
+
+    entries = raw.get("config")
+    if not isinstance(entries, list):
+        return "default"
+    for entry in entries:
+        if isinstance(entry, dict):
+            name = entry.get("name")
+            if isinstance(name, str) and name.strip():
+                return name
+    return "default"
+
+
 class SessionRegistry:
     """
     Global registry of LspSession instances, keyed by workspace path.
@@ -756,16 +798,23 @@ class SessionRegistry:
     """
 
     def __init__(self) -> None:
-        self._sessions: dict[Path, LspSession] = {}
-        self._locks: dict[Path, asyncio.Lock] = {}
+        self._sessions: dict[SessionKey, LspSession] = {}
+        self._locks: dict[SessionKey, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
-        self._config_mtimes: dict[Path, float | None] = {}
+        self._config_mtimes: dict[SessionKey, float | None] = {}
 
-    async def _ensure_lock(self, workspace: Path) -> asyncio.Lock:
+    @staticmethod
+    def _session_key(workspace: Path, config_path: Path | None = None) -> SessionKey:
+        return (workspace.resolve(), config_path.resolve() if config_path else None)
+
+    async def _ensure_lock(
+        self, workspace: Path, config_path: Path | None = None
+    ) -> asyncio.Lock:
+        key = self._session_key(workspace, config_path)
         async with self._global_lock:
-            if workspace not in self._locks:
-                self._locks[workspace] = asyncio.Lock()
-            return self._locks[workspace]
+            if key not in self._locks:
+                self._locks[key] = asyncio.Lock()
+            return self._locks[key]
 
     async def get_or_create(
         self,
@@ -773,14 +822,16 @@ class SessionRegistry:
         config_path: Path | None = None,
     ) -> LspSession:
         workspace = workspace.resolve()
-        lock = await self._ensure_lock(workspace)
+        config_path = config_path.resolve() if config_path else None
+        key = self._session_key(workspace, config_path)
+        lock = await self._ensure_lock(workspace, config_path)
 
         async with lock:
-            session = self._sessions.get(workspace)
+            session = self._sessions.get(key)
 
             if session is not None and session.is_ready:
                 current_mtime = _get_mtime(config_path)
-                stored_mtime = self._config_mtimes.get(workspace)
+                stored_mtime = self._config_mtimes.get(key)
                 if current_mtime is not None and current_mtime != stored_mtime:
                     logger.info(
                         "odools.toml mtime changed — restarting stale session for %s",
@@ -800,14 +851,30 @@ class SessionRegistry:
                 await session.stop()
 
             session = LspSession(workspace=workspace, config_path=config_path)
-            self._sessions[workspace] = session
-            self._config_mtimes[workspace] = _get_mtime(config_path)
+            self._sessions[key] = session
+            self._config_mtimes[key] = _get_mtime(config_path)
             await session.start()
             return session
 
-    async def get(self, workspace: Path) -> LspSession | None:
+    async def get(
+        self, workspace: Path, config_path: Path | None = None
+    ) -> LspSession | None:
         """Return existing session or None."""
-        return self._sessions.get(workspace.resolve())
+        workspace = workspace.resolve()
+        config_path = config_path.resolve() if config_path else None
+        if config_path is not None:
+            return self._sessions.get(self._session_key(workspace, config_path))
+
+        session = self._sessions.get(self._session_key(workspace, None))
+        if session is not None:
+            return session
+
+        matches = [
+            existing for key, existing in self._sessions.items() if key[0] == workspace
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
     async def stop_all(self) -> None:
         """Shut down all active sessions."""
@@ -824,17 +891,24 @@ class SessionRegistry:
     ) -> LspSession:
         """Force-restart the session for a workspace."""
         workspace = workspace.resolve()
-        lock = await self._ensure_lock(workspace)
+        config_path = config_path.resolve() if config_path else None
+        key = self._session_key(workspace, config_path)
+        lock = await self._ensure_lock(workspace, config_path)
         async with lock:
-            existing = self._sessions.pop(workspace, None)
-            self._config_mtimes.pop(workspace, None)
+            existing = self._sessions.pop(key, None)
+            self._config_mtimes.pop(key, None)
             if existing:
                 await existing.stop()
         return await self.get_or_create(workspace, config_path)
 
-    def status(self) -> dict[str, str]:
-        """Return {workspace_path: state_name} for all sessions."""
-        return {str(ws): s.state.name for ws, s in self._sessions.items()}
+    def status(self) -> dict[tuple[str, str | None], str]:
+        return {
+            (
+                str(workspace),
+                str(config_path) if config_path is not None else None,
+            ): session.state.name
+            for (workspace, config_path), session in self._sessions.items()
+        }
 
 
 # Module-level registry singleton

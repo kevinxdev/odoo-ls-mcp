@@ -14,9 +14,11 @@ import json
 import logging
 import shutil
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
+from .config import resolve_config
 from .models import Diagnostic, DiagnosticSeverity, ParseResult, Position, Range
 
 logger = logging.getLogger(__name__)
@@ -37,22 +39,13 @@ def _find_binary() -> str | None:
 
 
 def _build_command(
-    addon_path: Path,
+    addon_paths: list[Path],
     community_path: Path,
     tracked: Path,
     output_file: Path,
+    python_path: str | None = None,
     stdlib_path: Path | None = None,
 ) -> list[str]:
-    """
-    Build the odoo_ls_server -p command.
-
-    Args:
-        addon_path:     Parent directory that contains the addon(s).
-        community_path: Odoo community source root.
-        tracked:        Specific addon folder to analyse.
-        output_file:    Path where OdooLS will write its JSON output.
-        stdlib_path:    Optional path to typeshed stdlib stubs.
-    """
     binary = _find_binary()
     if binary is None:
         raise FileNotFoundError(
@@ -62,8 +55,6 @@ def _build_command(
     cmd = [
         binary,
         "-p",
-        "-a",
-        str(addon_path),
         "-c",
         str(community_path),
         "-t",
@@ -71,6 +62,10 @@ def _build_command(
         "-o",
         str(output_file),
     ]
+    for addon_path in addon_paths:
+        cmd += ["-a", str(addon_path)]
+    if python_path:
+        cmd += ["--python", python_path]
     effective_stdlib = stdlib_path or (
         DEFAULT_STDLIB_PATH if DEFAULT_STDLIB_PATH.exists() else None
     )
@@ -125,11 +120,74 @@ def _parse_lsp_diagnostics(data: dict[str, Any], workspace: str) -> list[Diagnos
     return _parse_output(data)
 
 
+def _resolve_path(base_dir: Path, value: str) -> Path | None:
+    if value == "$autoDetectAddons":
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    else:
+        path = path.resolve()
+    return path
+
+
+def _parse_workspace_config(
+    workspace: str | Path, config_path: str | Path | None = None
+) -> tuple[Path, list[Path], Path, str | None, Path | None]:
+    cfg = resolve_config(workspace_root=workspace, config_path=config_path)
+    assert cfg.config_path is not None
+
+    raw = tomllib.loads(Path(cfg.config_path).read_text(encoding="utf-8"))
+    entries = raw.get("config")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"No [[config]] entries found in {cfg.config_path}")
+
+    entry = entries[0]
+    if not isinstance(entry, dict):
+        raise ValueError(f"Invalid [[config]] entry in {cfg.config_path}")
+
+    config_dir = cfg.config_path.parent
+    odoo_value = entry.get("odoo_path")
+    if not isinstance(odoo_value, str) or not odoo_value.strip():
+        raise ValueError(f"Config {cfg.config_path} is missing a valid odoo_path")
+    community_path = _resolve_path(config_dir, odoo_value)
+    assert community_path is not None
+
+    addons_value = entry.get("addons_paths")
+    if not isinstance(addons_value, list) or not addons_value:
+        raise ValueError(f"Config {cfg.config_path} is missing valid addons_paths")
+    addon_paths = [
+        resolved
+        for item in addons_value
+        if isinstance(item, str)
+        for resolved in [_resolve_path(config_dir, item)]
+        if resolved is not None
+    ]
+    if not addon_paths:
+        raise ValueError(f"Config {cfg.config_path} did not resolve any addon paths")
+
+    python_value = entry.get("python_path")
+    python_path = (
+        python_value if isinstance(python_value, str) and python_value else None
+    )
+
+    stdlib_value = entry.get("stdlib")
+    stdlib_path = (
+        _resolve_path(config_dir, stdlib_value)
+        if isinstance(stdlib_value, str) and stdlib_value
+        else None
+    )
+
+    return cfg.workspace_root, addon_paths, community_path, python_path, stdlib_path
+
+
 async def run_parse(
-    addon_path: str | Path,
-    community_path: str | Path,
+    addon_path: str | Path | None = None,
+    community_path: str | Path | None = None,
     tracked_path: str | Path | None = None,
     stdlib_path: str | Path | None = None,
+    workspace: str | Path | None = None,
+    config_path: str | Path | None = None,
     timeout: float = DEFAULT_PARSE_TIMEOUT_S,
     min_severity: int = DiagnosticSeverity.HINT,
 ) -> ParseResult:
@@ -148,15 +206,36 @@ async def run_parse(
     Returns:
         ParseResult with diagnostics list and metadata.
     """
-    addon_path = Path(addon_path).resolve()
-    community_path = Path(community_path).resolve()
-    tracked = Path(tracked_path).resolve() if tracked_path else addon_path
-    stdlib = Path(stdlib_path).resolve() if stdlib_path else None
+    python_path: str | None = None
+    if workspace is not None:
+        (
+            workspace_root,
+            addon_paths,
+            community_root,
+            config_python,
+            config_stdlib,
+        ) = await asyncio.to_thread(_parse_workspace_config, workspace, config_path)
+        tracked = Path(tracked_path).resolve() if tracked_path else workspace_root
+        stdlib = Path(stdlib_path).resolve() if stdlib_path else config_stdlib
+        python_path = config_python
+        result_workspace = workspace_root
+    else:
+        if addon_path is None or community_path is None:
+            raise ValueError(
+                "run_parse requires either workspace/config_path or addon_path/community_path"
+            )
+        resolved_addon_path = Path(addon_path).resolve()
+        addon_paths = [resolved_addon_path]
+        community_root = Path(community_path).resolve()
+        tracked = Path(tracked_path).resolve() if tracked_path else resolved_addon_path
+        stdlib = Path(stdlib_path).resolve() if stdlib_path else None
+        result_workspace = resolved_addon_path
 
-    if not addon_path.exists():
-        raise ValueError(f"addon_path does not exist: {addon_path}")
-    if not community_path.exists():
-        raise ValueError(f"community_path does not exist: {community_path}")
+    for addon_dir in addon_paths:
+        if not addon_dir.exists():
+            raise ValueError(f"addon_path does not exist: {addon_dir}")
+    if not community_root.exists():
+        raise ValueError(f"community_path does not exist: {community_root}")
     if not tracked.exists():
         raise ValueError(f"tracked_path does not exist: {tracked}")
 
@@ -168,7 +247,14 @@ async def run_parse(
         output_file = Path(tmp.name)
 
     try:
-        cmd = _build_command(addon_path, community_path, tracked, output_file, stdlib)
+        cmd = _build_command(
+            addon_paths,
+            community_root,
+            tracked,
+            output_file,
+            python_path=python_path,
+            stdlib_path=stdlib,
+        )
         logger.debug("Running: %s", " ".join(cmd))
 
         proc = await asyncio.create_subprocess_exec(
@@ -205,8 +291,10 @@ async def run_parse(
                 "odoo_ls_server -p exited %d: %s", proc.returncode, stderr_text[:200]
             )
         elif output_file.exists():
-            output_text = output_file.read_text(
-                encoding="utf-8", errors="replace"
+            output_text = (
+                await asyncio.to_thread(
+                    output_file.read_text, encoding="utf-8", errors="replace"
+                )
             ).strip()
             if output_text:
                 try:
@@ -233,11 +321,11 @@ async def run_parse(
     files_analyzed = len({d.file for d in diagnostics})
 
     return ParseResult(
-        workspace=str(addon_path),
         files_analyzed=files_analyzed,
         diagnostics=diagnostics,
         errors=errors,
         raw=raw,
+        workspace=str(result_workspace),
     )
 
 

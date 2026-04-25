@@ -307,7 +307,7 @@ async def test_registry_returns_same_session(tmp_path: Path, fake_server_path: P
     async def patched_get_or_create(ws, cfg=None):
         sess = LspSession(workspace=ws, binary=sys.executable)
         sess._build_command = lambda: [sys.executable, str(fake_server_path)]
-        registry._sessions[ws.resolve()] = sess
+        registry._sessions[registry._session_key(ws)] = sess
         await sess.start()
         return sess
 
@@ -329,10 +329,39 @@ async def test_registry_status(tmp_path: Path, fake_server_path: Path):
     sess = LspSession(workspace=workspace, binary=sys.executable)
     sess._build_command = lambda: [sys.executable, str(fake_server_path)]
     await sess.start()
-    registry._sessions[workspace.resolve()] = sess
+    registry._sessions[registry._session_key(workspace)] = sess
 
     status = registry.status()
-    assert str(workspace.resolve()) in status
-    assert status[str(workspace.resolve())] in ("INDEXING", "READY")
+    key = (str(workspace.resolve()), None)
+    assert key in status
+    assert status[key] in ("INDEXING", "READY")
 
+    await registry.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_registry_distinguishes_config_paths(
+    tmp_path: Path, fake_server_path: Path
+):
+    workspace = tmp_path / "ws_config_key"
+    workspace.mkdir()
+    config_a = workspace / "a.toml"
+    config_b = workspace / "b.toml"
+    config_a.write_text("")
+    config_b.write_text("")
+
+    registry = SessionRegistry()
+    original_start = LspSession.start
+
+    async def patched_start(self):
+        self._build_command = lambda: [sys.executable, str(fake_server_path)]
+        await original_start(self)
+
+    with patch.object(LspSession, "start", patched_start):
+        sess_a = await registry.get_or_create(workspace, config_a)
+        sess_b = await registry.get_or_create(workspace, config_b)
+
+    assert sess_a is not sess_b
+    assert await registry.get(workspace, config_a) is sess_a
+    assert await registry.get(workspace, config_b) is sess_b
     await registry.stop_all()

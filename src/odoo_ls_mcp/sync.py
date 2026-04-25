@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 from .diagnostics_cache import DiagnosticsCache
 from .lsp_client import LspClient
@@ -32,7 +34,9 @@ class DocumentSync:
         uri = path_to_uri(file_path)
         if uri in self._open_uris:
             return
-        text = file_path.read_text(encoding="utf-8", errors="replace")
+        text = await asyncio.to_thread(
+            file_path.read_text, encoding="utf-8", errors="replace"
+        )
         self._versions[uri] = 1
         self._contents[uri] = text
         self._open_uris.add(uri)
@@ -67,7 +71,9 @@ class DocumentSync:
         if uri not in self._open_uris:
             await self.open_file(file_path)
             return
-        text = file_path.read_text(encoding="utf-8", errors="replace")
+        text = await asyncio.to_thread(
+            file_path.read_text, encoding="utf-8", errors="replace"
+        )
         if text == self._contents.get(uri):
             return
         version = self._versions.get(uri, 1) + 1
@@ -88,7 +94,7 @@ class DocumentSync:
             self._on_publish_diagnostics,
         )
 
-    def _on_publish_diagnostics(self, params: dict) -> None:
+    def _on_publish_diagnostics(self, params: dict[str, Any]) -> None:
         uri = params.get("uri", "")
         diagnostics = params.get("diagnostics", [])
         self._cache.update(uri, diagnostics)

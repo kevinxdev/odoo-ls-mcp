@@ -188,7 +188,6 @@ async def test_e2e_indexing_status_no_sessions(server_params):
 
 @pytest.mark.asyncio
 async def test_e2e_lookup_model_found(server_params):
-    """lookup_model must find the hosting.domain.service model in the workspace."""
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -197,7 +196,7 @@ async def test_e2e_lookup_model_found(server_params):
                 "lookup_model",
                 {
                     "workspace": str(WORKSPACE),
-                    "model": "hosting.domain.service",
+                    "model": "hosting.domain",
                 },
             )
 

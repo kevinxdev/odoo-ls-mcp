@@ -16,6 +16,7 @@ from odoo_ls_mcp.models import (
     Range,
 )
 from odoo_ls_mcp.parse_tool import (
+    DEFAULT_STDLIB_PATH,
     _parse_output,
     format_diagnostics_text,
     run_parse,
@@ -243,7 +244,7 @@ def test_format_with_errors():
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_proc(output_data: dict, returncode: int = 0) -> MagicMock:
+def _make_mock_proc(output_data: dict[str, object], returncode: int = 0) -> MagicMock:
     """Create a mock subprocess that writes output_data to the temp file."""
     mock_proc = MagicMock()
     mock_proc.returncode = returncode
@@ -317,6 +318,55 @@ async def test_run_parse_success(tmp_addon, mock_binary):
     assert result.errors == []
     # 2 unique files had diagnostics
     assert result.files_analyzed == 2
+
+
+@pytest.mark.asyncio
+async def test_run_parse_workspace_config_mode(tmp_path, mock_binary):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    addons_a = workspace / "addons_a"
+    addons_b = workspace / "addons_b"
+    addons_a.mkdir()
+    addons_b.mkdir()
+    community = workspace / "odoo"
+    community.mkdir()
+    config = workspace / "odools.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[[config]]",
+                'odoo_path = "./odoo"',
+                'addons_paths = ["./addons_a", "./addons_b", "$autoDetectAddons"]',
+                'python_path = "python3"',
+                f'stdlib = "{DEFAULT_STDLIB_PATH.as_posix()}"',
+            ]
+        )
+    )
+
+    output_json = json.dumps(SAMPLE_EVENTS_OUTPUT).encode()
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+
+    async def fake_communicate():
+        return b"", b""
+
+    mock_proc.communicate = fake_communicate
+
+    async def fake_exec(*args, **kwargs):
+        cmd = list(args)
+        assert cmd.count("-a") == 2
+        assert "--python" in cmd
+        assert cmd[cmd.index("-c") + 1] == str(community.resolve())
+        assert cmd[cmd.index("-t") + 1] == str(workspace.resolve())
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(output_json)
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        result = await run_parse(workspace=workspace, config_path=config)
+
+    assert len(result.diagnostics) == 3
+    assert result.workspace == str(workspace.resolve())
 
 
 @pytest.mark.asyncio

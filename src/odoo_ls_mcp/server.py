@@ -14,13 +14,16 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import re
+import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from pydantic import Field
 
+from .config import resolve_config
 from .lsp_session import (
     INDEXING_READY_TIMEOUT,
     REQUEST_TIMEOUT,
@@ -48,10 +51,10 @@ def _atexit_shutdown() -> None:
         loop.run_until_complete(get_registry().stop_all())
         loop.close()
     except Exception:
-        pass
+        logger.exception("Failed to stop OdooLS sessions during interpreter shutdown")
 
 
-atexit.register(_atexit_shutdown)
+_ = atexit.register(_atexit_shutdown)
 
 mcp = FastMCP(
     name="odoo-ls-mcp",
@@ -68,7 +71,7 @@ mcp = FastMCP(
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 
-def _fmt_hover(result: dict | None) -> str:
+def _fmt_hover(result: dict[str, Any] | None) -> str:
     if result is None:
         return "No hover information available at this position."
     contents = result.get("contents", "")
@@ -121,7 +124,133 @@ def _uri_to_path(uri: str) -> str:
     return uri[7:] if uri.startswith("file://") else uri
 
 
-def _fmt_locations(locations: list[dict], empty_msg: str = "No results found.") -> str:
+def _session_label(workspace: str, config_path: str | None) -> str:
+    return (
+        f"{workspace} (config: {config_path})" if config_path is not None else workspace
+    )
+
+
+async def _read_text(path: Path) -> str:
+    return await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+
+
+async def _run_subprocess(
+    args: list[str], timeout: float = 15
+) -> subprocess.CompletedProcess[str]:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise subprocess.TimeoutExpired(args, timeout) from None
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=proc.returncode or 0,
+        stdout=stdout.decode(errors="replace"),
+        stderr=stderr.decode(errors="replace"),
+    )
+
+
+async def _lookup_model_via_odools(
+    workspace_root: Path,
+    config_path: Path | None,
+    model_name: str,
+    max_results: int,
+) -> str:
+    if config_path is None:
+        config_path = resolve_config(workspace_root=workspace_root).config_path
+    registry = get_registry()
+    session = await registry.get_or_create(workspace_root, config_path)
+
+    query = model_name
+    symbols = await session.workspace_symbols(query, timeout=REQUEST_TIMEOUT)
+    if not symbols:
+        return (
+            f"No model definitions found matching '{model_name}' in {workspace_root}."
+        )
+
+    normalized_query = model_name.strip().strip('"')
+    exact_matches: list[dict[str, Any]] = []
+    partial_matches: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for symbol in symbols:
+        raw_name = symbol.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        normalized_name = raw_name.strip().strip('"')
+        if normalized_name == normalized_query:
+            target = exact_matches
+        elif normalized_query in normalized_name:
+            target = partial_matches
+        else:
+            continue
+
+        location = symbol.get("location", {})
+        uri = location.get("uri", "")
+        start = (location.get("range", {}) or {}).get("start", {}) or {}
+        dedupe_key = (
+            uri,
+            start.get("line", 0),
+            start.get("character", 0),
+            normalized_name,
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        target.append(symbol)
+
+    model_symbols = (exact_matches + partial_matches)[:max_results]
+    if not model_symbols:
+        return (
+            f"No model definitions found matching '{model_name}' in {workspace_root}."
+        )
+
+    lines = [
+        f"🔍 Model lookup: '{model_name}'  —  {len(model_symbols)} result(s)"
+        + (" (truncated)" if len(symbols) > max_results else ""),
+        "",
+    ]
+    for sym in model_symbols:
+        location = sym.get("location", {})
+        uri = location.get("uri", "")
+        file_path = _uri_to_path(uri)
+        display_path = file_path
+        if file_path:
+            try:
+                display_path = str(Path(file_path).relative_to(workspace_root))
+            except ValueError:
+                display_path = file_path
+        row = f"  📄 {display_path}"
+        range_data = location.get("range", {})
+        start = range_data.get("start") or {}
+        if start:
+            row += f":{start.get('line', 0) + 1}"
+        lines.append(row)
+        container = sym.get("containerName")
+        if container:
+            lines.append(f"     container: {container}")
+
+    return "\n".join(lines)
+
+
+def _resolve_session_config_path(
+    workspace: Path, config_path: Path | None
+) -> tuple[Path | None, str | None]:
+    if config_path is not None:
+        return config_path, None
+    return None, None
+
+
+def _fmt_locations(
+    locations: list[dict[str, Any]], empty_msg: str = "No results found."
+) -> str:
     if not locations:
         return empty_msg
     lines = [f"Found {len(locations)} location(s):"]
@@ -136,7 +265,7 @@ def _fmt_locations(locations: list[dict], empty_msg: str = "No results found.") 
     return "\n".join(lines)
 
 
-def _fmt_symbols(symbols: list[dict], source: str = "") -> str:
+def _fmt_symbols(symbols: list[dict[str, Any]], source: str = "") -> str:
     if not symbols:
         return f"No symbols found{' for: ' + source if source else ''}."
     lines = [f"Found {len(symbols)} symbol(s){' for: ' + source if source else ''}:"]
@@ -167,7 +296,7 @@ def _fmt_symbols(symbols: list[dict], source: str = "") -> str:
     return "\n".join(lines)
 
 
-def _fmt_completions(items: list[dict]) -> str:
+def _fmt_completions(items: list[dict[str, Any]]) -> str:
     if not items:
         return "No completions available at this position."
     lines = [f"Found {len(items)} completion(s):"]
@@ -308,7 +437,7 @@ async def list_odools_config(
         prefix = "✅ (nearest — active)" if i == 0 else f"  (ancestor #{i})"
         lines.append(f"{prefix}: {p}")
         try:
-            content = p.read_text(encoding="utf-8")
+            content = await _read_text(p)
             lines.append("  Content preview:")
             for line in content.splitlines()[:20]:
                 lines.append(f"    {line}")
@@ -419,10 +548,13 @@ async def start_session(
     ] = INDEXING_READY_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     if not ws.exists():
         return f"❌ Workspace path does not exist: {ws}"
 
-    cfg = Path(config_path).resolve() if config_path else None
     registry = get_registry()
 
     try:
@@ -445,7 +577,8 @@ async def start_session(
     else:
         status = f"✅ Session started (state={session.state.name})"
 
-    return f"{status}\n  Workspace: {ws}\n  State:     {session.state.name}"
+    label = _session_label(str(ws), str(cfg) if cfg else None)
+    return f"{status}\n  Workspace: {label}\n  State:     {session.state.name}"
 
 
 # ── Tool: get_live_diagnostics ────────────────────────────────────────────────
@@ -465,6 +598,10 @@ async def get_live_diagnostics(
         str,
         Field(description="Absolute path to the Odoo workspace root."),
     ],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     file_path: Annotated[
         str | None,
         Field(default=None, description="Optional: absolute path to a specific file."),
@@ -489,13 +626,16 @@ async def get_live_diagnostics(
     ] = 3.0,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session for this workspace.\nCall start_session first."
 
-    # Optionally open a specific file to trigger diagnostics
     if file_path:
         fp = Path(file_path).resolve()
         if not fp.exists():
@@ -506,7 +646,11 @@ async def get_live_diagnostics(
                 try:
                     await session.wait_for_diagnostics(timeout=wait_seconds)
                 except TimeoutError:
-                    pass  # return whatever is cached
+                    logger.info(
+                        "Timed out waiting for diagnostics for %s in %s",
+                        fp,
+                        _session_label(str(ws), str(cfg) if cfg else None),
+                    )
         except Exception as exc:  # noqa: BLE001
             return f"❌ Error opening file: {exc}"
 
@@ -518,7 +662,7 @@ async def get_live_diagnostics(
         all_diags = {k: v for k, v in all_diags.items() if k == fp_str}
 
     # Apply severity filter
-    filtered: dict[str, list] = {}
+    filtered: dict[str, list[Any]] = {}
     for path_str, diags in all_diags.items():
         kept = [d for d in diags if d.severity <= min_severity]
         if kept:
@@ -529,9 +673,9 @@ async def get_live_diagnostics(
         return f"✅ No diagnostics (severity ≤ {min_severity}) in {scope}."
 
     severity_icons = {1: "🔴", 2: "🟡", 3: "🔵", 4: "⚪"}
+    issue_count = sum(len(v) for v in filtered.values())
     lines = [
-        f"📋 Live diagnostics — {sum(len(v) for v in filtered.values())} issue(s) "
-        f"across {len(filtered)} file(s)",
+        f"📋 Live diagnostics — {issue_count} issue(s) across {len(filtered)} file(s)",
         "",
     ]
     for file_str, diags in sorted(filtered.items()):
@@ -564,14 +708,22 @@ async def hover(
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     timeout: Annotated[
         float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     fp = Path(file_path).resolve()
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -608,14 +760,22 @@ async def go_to_definition(
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     timeout: Annotated[
         float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     fp = Path(file_path).resolve()
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -654,14 +814,22 @@ async def completions(
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     timeout: Annotated[
         float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     fp = Path(file_path).resolve()
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -699,7 +867,7 @@ async def indexing_status() -> str:
         return "No active OdooLS sessions."
 
     lines = [f"📊 Active OdooLS sessions ({len(status)}):"]
-    for ws_path, state_name in status.items():
+    for (ws_path, config_path), state_name in status.items():
         icon = {
             "READY": "✅",
             "INDEXING": "⏳",
@@ -709,10 +877,11 @@ async def indexing_status() -> str:
             "STOPPED": "⏹️",
             "SHUTTING_DOWN": "⏹️",
         }.get(state_name, "•")
-        lines.append(f"  {icon} {ws_path}  [{state_name}]")
+        lines.append(f"  {icon} {_session_label(ws_path, config_path)}  [{state_name}]")
 
-        # Show active progress tokens
-        session = await registry.get(Path(ws_path))
+        session = await registry.get(
+            Path(ws_path), Path(config_path) if config_path else None
+        )
         if session:
             active = [p for p in session._progress.values() if not p.done]
             for prog in active:
@@ -756,7 +925,10 @@ async def restart_server(
     if not ws.exists():
         return f"❌ Workspace path does not exist: {ws}"
 
-    cfg = Path(config_path).resolve() if config_path else None
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     registry = get_registry()
 
     try:
@@ -770,9 +942,15 @@ async def restart_server(
     if wait_for_indexing:
         indexed = await session.wait_for_indexing()
         suffix = "indexing complete" if indexed else "indexing in progress"
-        return f"✅ Restarted and ready ({suffix}): {ws}"
+        return (
+            f"✅ Restarted and ready ({suffix}): "
+            f"{_session_label(str(ws), str(cfg) if cfg else None)}"
+        )
 
-    return f"✅ Restarted (state={session.state.name}): {ws}"
+    return (
+        f"✅ Restarted (state={session.state.name}): "
+        f"{_session_label(str(ws), str(cfg) if cfg else None)}"
+    )
 
 
 # ── Tool: stop_session ────────────────────────────────────────────────────────
@@ -789,16 +967,24 @@ async def stop_session(
     workspace: Annotated[
         str, Field(description="Absolute path to the Odoo workspace root.")
     ],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None:
-        return f"ℹ️ No active session for: {ws}"
+        return f"ℹ️ No active session for: {_session_label(str(ws), str(cfg) if cfg else None)}"
 
     await session.stop()
-    return f"✅ Session stopped: {ws}"
+    return f"✅ Session stopped: {_session_label(str(ws), str(cfg) if cfg else None)}"
 
 
 # ── Tool: find_references ─────────────────────────────────────────────────────
@@ -819,6 +1005,10 @@ async def find_references(
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
     line: Annotated[int, Field(description="0-based line number.", ge=0)],
     character: Annotated[int, Field(description="0-based character offset.", ge=0)],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     include_declaration: Annotated[
         bool,
         Field(default=True, description="Include the declaration in results."),
@@ -828,9 +1018,13 @@ async def find_references(
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     fp = Path(file_path).resolve()
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -873,14 +1067,22 @@ async def document_symbols(
         str, Field(description="Absolute path to the Odoo workspace root.")
     ],
     file_path: Annotated[str, Field(description="Absolute path to the source file.")],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     timeout: Annotated[
         float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     fp = Path(file_path).resolve()
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -919,13 +1121,21 @@ async def workspace_symbols(
         str,
         Field(description="Symbol name or prefix to search for (empty string = all)."),
     ],
+    config_path: Annotated[
+        str | None,
+        Field(default=None, description="Optional absolute path to odools.toml."),
+    ] = None,
     timeout: Annotated[
         float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
     ] = REQUEST_TIMEOUT,
 ) -> str:
     ws = Path(workspace).resolve()
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
     registry = get_registry()
-    session = await registry.get(ws)
+    session = await registry.get(ws, cfg)
 
     if session is None or not session.is_ready:
         return "⚠️ No active session. Call start_session first."
@@ -962,8 +1172,10 @@ async def session_health() -> str:
         return "No active OdooLS sessions.\nCall start_session to begin."
 
     lines = [f"🏥 Session health — {len(status)} active workspace(s)", ""]
-    for ws_path, state_name in status.items():
-        session = await registry.get(Path(ws_path))
+    for (ws_path, config_path), state_name in status.items():
+        session = await registry.get(
+            Path(ws_path), Path(config_path) if config_path else None
+        )
         icon = {
             "READY": "✅",
             "INDEXING": "⏳",
@@ -973,7 +1185,7 @@ async def session_health() -> str:
             "STOPPED": "⏹️",
             "SHUTTING_DOWN": "⏹️",
         }.get(state_name, "•")
-        lines.append(f"{icon} Workspace: {ws_path}")
+        lines.append(f"{icon} Workspace: {_session_label(ws_path, config_path)}")
         lines.append(f"   State  : {state_name}")
         if session:
             lines.append(f"   Ready  : {session.is_ready}")
@@ -1012,8 +1224,6 @@ async def inspect_workspace_config(
         ),
     ] = None,
 ) -> str:
-    from .config import resolve_config
-
     try:
         cfg = resolve_config(workspace_root=workspace, config_path=config_path)
     except FileNotFoundError as exc:
@@ -1031,7 +1241,7 @@ async def inspect_workspace_config(
 
     if cfg.config_path and cfg.config_path.exists():
         try:
-            raw = cfg.config_path.read_text(encoding="utf-8")
+            raw = await _read_text(cfg.config_path)
             lines.append("📄 Config contents:")
             lines.append("─" * 40)
             lines.append(raw.rstrip())
@@ -1050,7 +1260,7 @@ async def inspect_workspace_config(
         "Find Odoo model definitions in the workspace by model name or partial name. "
         "Searches for class definitions and _name/'_inherit' assignments that match "
         "the query. Returns file locations and context lines. "
-        "Does not require a live OdooLS session — searches source files directly."
+        "Uses OdooLS workspace symbol search for model names and inherited models."
     ),
 )
 async def lookup_model(
@@ -1064,63 +1274,43 @@ async def lookup_model(
             description="Odoo model name or partial name, e.g. 'sale.order' or 'sale'."
         ),
     ],
+    config_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional absolute path to an odools.toml config file.",
+        ),
+    ] = None,
     max_results: Annotated[
         int,
         Field(default=20, ge=1, le=100, description="Maximum matches to return."),
     ] = 20,
 ) -> str:
-    import re
-    import subprocess
-
     ws = Path(workspace).resolve()
     if not ws.exists():
         return f"❌ Workspace path does not exist: {ws}"
 
-    # Escape for use in regex
-    model_escaped = re.escape(model)
-    # Pattern matches _name = "..." or _inherit = "..." or _inherit = [...]
-    pattern = (
-        rf"""_name\s*=\s*['"]{model_escaped}['"]|"""
-        rf"""_inherit\s*=\s*['"]{model_escaped}['"]|"""
-        rf"""_inherit\s*=\s*\[[^\]]*['"]{model_escaped}['"][^\]]*\]"""
-    )
+    cfg_input = Path(config_path).resolve() if config_path else None
+    cfg, cfg_error = _resolve_session_config_path(ws, cfg_input)
+    if cfg_error:
+        return cfg_error
 
     try:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*.py", "-E", pattern, str(ws)],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        return await _lookup_model_via_odools(
+            workspace_root=ws,
+            config_path=cfg,
+            model_name=model,
+            max_results=max_results,
         )
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         return f"❌ Search timed out for model '{model}' in {ws}"
+    except ValueError as exc:
+        return f"❌ Invalid argument: {exc}"
+    except RuntimeError as exc:
+        return f"❌ LSP error: {exc}"
     except Exception as exc:  # noqa: BLE001
+        logger.exception("lookup_model error")
         return f"❌ Search error: {exc}"
-
-    matches = [ln for ln in result.stdout.splitlines() if ln.strip()]
-    if not matches:
-        return f"No model definitions found matching '{model}' in {ws}."
-
-    matches = matches[:max_results]
-    lines = [
-        f"🔍 Model lookup: '{model}'  —  {len(matches)} result(s)"
-        + (" (truncated)" if len(result.stdout.splitlines()) > max_results else ""),
-        "",
-    ]
-    for m in matches:
-        # grep format: path:line:content
-        parts = m.split(":", 2)
-        if len(parts) == 3:
-            fpath, lineno, content = parts
-            rel = (
-                Path(fpath).relative_to(ws) if Path(fpath).is_relative_to(ws) else fpath
-            )
-            lines.append(f"  📄 {rel}:{lineno}")
-            lines.append(f"     {content.strip()}")
-        else:
-            lines.append(f"  {m}")
-
-    return "\n".join(lines)
 
 
 # ── Tool: lookup_xmlid ────────────────────────────────────────────────────────
@@ -1154,9 +1344,6 @@ async def lookup_xmlid(
         Field(default=20, ge=1, le=100, description="Maximum matches to return."),
     ] = 20,
 ) -> str:
-    import re
-    import subprocess
-
     ws = Path(workspace).resolve()
     if not ws.exists():
         return f"❌ Workspace path does not exist: {ws}"
@@ -1174,10 +1361,8 @@ async def lookup_xmlid(
         if len(results) >= max_results:
             break
         try:
-            r = subprocess.run(
+            r = await _run_subprocess(
                 ["grep", "-rn", f"--include={include}", "-E", pat, str(ws)],
-                capture_output=True,
-                text=True,
                 timeout=15,
             )
         except subprocess.TimeoutExpired:

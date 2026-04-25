@@ -125,7 +125,7 @@ async def test_crash_recovery_creates_fresh_session(
     assert sess.state == SessionState.FAILED
 
     registry = SessionRegistry()
-    registry._sessions[workspace.resolve()] = sess
+    registry._sessions[registry._session_key(workspace)] = sess
 
     original_start = LspSession.start
 

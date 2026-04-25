@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,7 +32,7 @@ async def test_session_health_with_ready_session():
     mock_session._progress = {}
 
     with patch("odoo_ls_mcp.server.get_registry") as mock_reg:
-        mock_reg.return_value.status.return_value = {"/some/workspace": "READY"}
+        mock_reg.return_value.status.return_value = {("/some/workspace", None): "READY"}
         mock_reg.return_value.get = AsyncMock(return_value=mock_session)
         result = await session_health()
 
@@ -55,7 +54,7 @@ async def test_session_health_with_indexing_session():
     mock_session._progress = {"tok1": prog}
 
     with patch("odoo_ls_mcp.server.get_registry") as mock_reg:
-        mock_reg.return_value.status.return_value = {"/ws": "INDEXING"}
+        mock_reg.return_value.status.return_value = {("/ws", None): "INDEXING"}
         mock_reg.return_value.get = AsyncMock(return_value=mock_session)
         result = await session_health()
 
@@ -112,27 +111,39 @@ async def test_lookup_model_workspace_not_found(tmp_path):
 
 @pytest.mark.asyncio
 async def test_lookup_model_no_matches(tmp_path):
-    result = await lookup_model(workspace=str(tmp_path), model="no.such.model")
+    with patch(
+        "odoo_ls_mcp.server._lookup_model_via_odools", new=AsyncMock()
+    ) as mock_fn:
+        mock_fn.return_value = (
+            f"No model definitions found matching 'no.such.model' in {tmp_path}."
+        )
+        result = await lookup_model(workspace=str(tmp_path), model="no.such.model")
     assert "No model definitions found" in result
     assert "no.such.model" in result
 
 
 @pytest.mark.asyncio
 async def test_lookup_model_finds_name(tmp_path):
-    py_file = tmp_path / "model.py"
-    py_file.write_text(
-        'class SaleOrder(Model):\n    _name = "sale.order"\n    _description = "Order"\n'
-    )
-    result = await lookup_model(workspace=str(tmp_path), model="sale.order")
+    with patch(
+        "odoo_ls_mcp.server._lookup_model_via_odools", new=AsyncMock()
+    ) as mock_fn:
+        mock_fn.return_value = (
+            "🔍 Model lookup: 'sale.order'  —  1 result(s)\n\n  📄 model.py:2"
+        )
+        result = await lookup_model(workspace=str(tmp_path), model="sale.order")
     assert "sale.order" in result
     assert "model.py" in result
 
 
 @pytest.mark.asyncio
 async def test_lookup_model_finds_inherit(tmp_path):
-    py_file = tmp_path / "ext.py"
-    py_file.write_text('class SaleOrderExt(Model):\n    _inherit = "sale.order"\n')
-    result = await lookup_model(workspace=str(tmp_path), model="sale.order")
+    with patch(
+        "odoo_ls_mcp.server._lookup_model_via_odools", new=AsyncMock()
+    ) as mock_fn:
+        mock_fn.return_value = (
+            "🔍 Model lookup: 'sale.order'  —  1 result(s)\n\n  📄 ext.py:2"
+        )
+        result = await lookup_model(workspace=str(tmp_path), model="sale.order")
     assert "sale.order" in result
     assert "ext.py" in result
 
@@ -140,8 +151,8 @@ async def test_lookup_model_finds_inherit(tmp_path):
 @pytest.mark.asyncio
 async def test_lookup_model_timeout(tmp_path):
     with patch(
-        "subprocess.run",
-        side_effect=__import__("subprocess").TimeoutExpired("grep", 15),
+        "odoo_ls_mcp.server._lookup_model_via_odools",
+        new=AsyncMock(side_effect=TimeoutError()),
     ):
         result = await lookup_model(workspace=str(tmp_path), model="sale.order")
     assert "timed out" in result.lower()
@@ -187,8 +198,8 @@ async def test_lookup_xmlid_strips_module_prefix(tmp_path):
 @pytest.mark.asyncio
 async def test_lookup_xmlid_timeout(tmp_path):
     with patch(
-        "subprocess.run",
-        side_effect=__import__("subprocess").TimeoutExpired("grep", 15),
+        "odoo_ls_mcp.server._run_subprocess",
+        new=AsyncMock(side_effect=__import__("subprocess").TimeoutExpired("grep", 15)),
     ):
         result = await lookup_xmlid(workspace=str(tmp_path), xmlid="some.xmlid")
     assert "timed out" in result.lower()
