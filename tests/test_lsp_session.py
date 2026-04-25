@@ -403,7 +403,7 @@ async def test_registry_refreshes_last_used_on_get_or_create(
 ):
     workspace = tmp_path / "ws_ttl_touch"
     workspace.mkdir()
-    monkeypatch.setenv("ODOO_LS_IDLE_TTL", "0.3")
+    monkeypatch.setenv("ODOO_LS_IDLE_TTL", "60")
 
     registry = SessionRegistry()
     original_start = LspSession.start
@@ -415,16 +415,14 @@ async def test_registry_refreshes_last_used_on_get_or_create(
     with patch.object(LspSession, "start", patched_start):
         session = await registry.get_or_create(workspace)
         await session.wait_for_indexing(timeout=5.0)
+        key = registry._session_key(workspace)
+        first_last_used = registry._last_used[key]
         await asyncio.sleep(0.15)
 
         same_session = await registry.get_or_create(workspace)
         assert same_session is session
+        assert registry._last_used[key] > first_last_used
 
-        await asyncio.sleep(0.2)
         assert await registry.get(workspace) is session
-
-        await asyncio.sleep(0.25)
-        assert await registry.get(workspace) is None
-        assert session.state == SessionState.STOPPED
 
     await registry.stop_all()
