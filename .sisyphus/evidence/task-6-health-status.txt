@@ -1,0 +1,14 @@
+Task 6: Health/Status Tool Verification
+=========================================
+session_health tool:
+  - Returns "No active sessions" + "Call start_session" when no sessions exist
+  - Shows workspace path, state name, is_ready flag
+  - Shows active indexing progress tokens with percentages
+  - State icons: ✅ READY, ⏳ INDEXING, 🔄 STARTING/INITIALIZING, ❌ FAILED
+
+inspect_workspace_config tool:
+  - Shows workspace root, config file path, OdooLS binary path
+  - Displays raw odools.toml content when file exists
+  - Returns ❌ error when workspace path does not exist
+
+All verified via unit tests in tests/test_odoo_helpers.py.

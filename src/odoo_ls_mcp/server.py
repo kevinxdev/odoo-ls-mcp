@@ -929,6 +929,276 @@ async def workspace_symbols(
         return f"❌ Unexpected error: {exc}"
 
 
+# ── Tool: session_health ─────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="session_health",
+    description=(
+        "Report the health and configuration of all active OdooLS sessions. "
+        "Returns workspace root, resolved config path, session state, readiness, "
+        "and any active indexing progress. Useful for diagnosing session problems "
+        "before calling navigation or diagnostics tools."
+    ),
+)
+async def session_health() -> str:
+    registry = get_registry()
+    status = registry.status()
+
+    if not status:
+        return "No active OdooLS sessions.\nCall start_session to begin."
+
+    lines = [f"🏥 Session health — {len(status)} active workspace(s)", ""]
+    for ws_path, state_name in status.items():
+        session = await registry.get(Path(ws_path))
+        icon = {
+            "READY": "✅",
+            "INDEXING": "⏳",
+            "STARTING": "🔄",
+            "INITIALIZING": "🔄",
+            "FAILED": "❌",
+            "STOPPED": "⏹️",
+            "SHUTTING_DOWN": "⏹️",
+        }.get(state_name, "•")
+        lines.append(f"{icon} Workspace: {ws_path}")
+        lines.append(f"   State  : {state_name}")
+        if session:
+            lines.append(f"   Ready  : {session.is_ready}")
+            active = [p for p in session._progress.values() if not p.done]
+            if active:
+                lines.append(f"   Indexing progress ({len(active)} token(s)):")
+                for prog in active:
+                    pct = f" {prog.percentage}%" if prog.percentage is not None else ""
+                    lines.append(f"     • {prog.title}: {prog.message}{pct}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+# ── Tool: inspect_workspace_config ────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="inspect_workspace_config",
+    description=(
+        "Read and display the resolved OdooLS configuration (odools.toml) for a "
+        "workspace. Shows addon paths, Odoo source path, Python path, and other "
+        "settings. Useful before starting a session or when diagnosing config issues."
+    ),
+)
+async def inspect_workspace_config(
+    workspace: Annotated[
+        str,
+        Field(description="Absolute path to the Odoo workspace root."),
+    ],
+    config_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional explicit path to odools.toml. Auto-discovered if omitted.",
+        ),
+    ] = None,
+) -> str:
+    from .config import resolve_config
+
+    try:
+        cfg = resolve_config(workspace_root=workspace, config_path=config_path)
+    except FileNotFoundError as exc:
+        return f"❌ {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ Config resolution error: {exc}"
+
+    lines = ["🔧 OdooLS workspace configuration", ""]
+    lines.append(f"  Workspace root : {cfg.workspace_root}")
+    lines.append(
+        f"  Config file    : {cfg.config_path if cfg.config_path else '(none found)'}"
+    )
+    lines.append(f"  OdooLS binary  : {cfg.odools_binary}")
+    lines.append("")
+
+    if cfg.config_path and cfg.config_path.exists():
+        try:
+            raw = cfg.config_path.read_text(encoding="utf-8")
+            lines.append("📄 Config contents:")
+            lines.append("─" * 40)
+            lines.append(raw.rstrip())
+        except OSError as exc:
+            lines.append(f"⚠️  Could not read config file: {exc}")
+
+    return "\n".join(lines)
+
+
+# ── Tool: lookup_model ────────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="lookup_model",
+    description=(
+        "Find Odoo model definitions in the workspace by model name or partial name. "
+        "Searches for class definitions and _name/'_inherit' assignments that match "
+        "the query. Returns file locations and context lines. "
+        "Does not require a live OdooLS session — searches source files directly."
+    ),
+)
+async def lookup_model(
+    workspace: Annotated[
+        str,
+        Field(description="Absolute path to the Odoo workspace root."),
+    ],
+    model: Annotated[
+        str,
+        Field(
+            description="Odoo model name or partial name, e.g. 'sale.order' or 'sale'."
+        ),
+    ],
+    max_results: Annotated[
+        int,
+        Field(default=20, ge=1, le=100, description="Maximum matches to return."),
+    ] = 20,
+) -> str:
+    import re
+    import subprocess
+
+    ws = Path(workspace).resolve()
+    if not ws.exists():
+        return f"❌ Workspace path does not exist: {ws}"
+
+    # Escape for use in regex
+    model_escaped = re.escape(model)
+    # Pattern matches _name = "..." or _inherit = "..." or _inherit = [...]
+    pattern = (
+        rf"""_name\s*=\s*['"]{model_escaped}['"]|"""
+        rf"""_inherit\s*=\s*['"]{model_escaped}['"]|"""
+        rf"""_inherit\s*=\s*\[[^\]]*['"]{model_escaped}['"][^\]]*\]"""
+    )
+
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include=*.py", "-E", pattern, str(ws)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return f"❌ Search timed out for model '{model}' in {ws}"
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ Search error: {exc}"
+
+    matches = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    if not matches:
+        return f"No model definitions found matching '{model}' in {ws}."
+
+    matches = matches[:max_results]
+    lines = [
+        f"🔍 Model lookup: '{model}'  —  {len(matches)} result(s)"
+        + (" (truncated)" if len(result.stdout.splitlines()) > max_results else ""),
+        "",
+    ]
+    for m in matches:
+        # grep format: path:line:content
+        parts = m.split(":", 2)
+        if len(parts) == 3:
+            fpath, lineno, content = parts
+            rel = (
+                Path(fpath).relative_to(ws) if Path(fpath).is_relative_to(ws) else fpath
+            )
+            lines.append(f"  📄 {rel}:{lineno}")
+            lines.append(f"     {content.strip()}")
+        else:
+            lines.append(f"  {m}")
+
+    return "\n".join(lines)
+
+
+# ── Tool: lookup_xmlid ────────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="lookup_xmlid",
+    description=(
+        "Find XML ID definitions in the workspace by ID or partial ID. "
+        "Searches XML data files and Python code for 'id=\"...\"' or 'ref(\"...\")' "
+        "patterns that match the query. Returns file locations and context. "
+        "Does not require a live OdooLS session — searches source files directly."
+    ),
+)
+async def lookup_xmlid(
+    workspace: Annotated[
+        str,
+        Field(description="Absolute path to the Odoo workspace root."),
+    ],
+    xmlid: Annotated[
+        str,
+        Field(
+            description=(
+                "XML ID or partial ID to search for, e.g. 'sale.action_orders' "
+                "or just 'action_orders'. Module prefix is optional."
+            )
+        ),
+    ],
+    max_results: Annotated[
+        int,
+        Field(default=20, ge=1, le=100, description="Maximum matches to return."),
+    ] = 20,
+) -> str:
+    import re
+    import subprocess
+
+    ws = Path(workspace).resolve()
+    if not ws.exists():
+        return f"❌ Workspace path does not exist: {ws}"
+
+    # Strip module prefix if present (e.g. "sale.action_orders" → "action_orders")
+    local_id = xmlid.split(".")[-1] if "." in xmlid else xmlid
+    id_escaped = re.escape(local_id)
+
+    # Search XML files for id="..." and Python files for ref("...") / xml_id
+    xml_pattern = rf'id\s*=\s*["\']([^"\']*\.)?{id_escaped}["\']'
+    py_pattern = rf"""["\']([^"\']*\.)?{id_escaped}["\']"""
+
+    results: list[str] = []
+    for include, pat in [("*.xml", xml_pattern), ("*.py", py_pattern)]:
+        if len(results) >= max_results:
+            break
+        try:
+            r = subprocess.run(
+                ["grep", "-rn", f"--include={include}", "-E", pat, str(ws)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return f"❌ Search timed out for xmlid '{xmlid}' in {ws}"
+        except Exception as exc:  # noqa: BLE001
+            return f"❌ Search error: {exc}"
+        results.extend(r.stdout.splitlines())
+
+    results = [ln for ln in results if ln.strip()]
+    matches = results[:max_results]
+    if not matches:
+        return f"No XML ID definitions found matching '{xmlid}' in {ws}."
+
+    total = len(results)
+    lines = [
+        f"🔍 XML ID lookup: '{xmlid}'  —  {min(total, max_results)} result(s)"
+        + (" (truncated)" if total > max_results else ""),
+        "",
+    ]
+    for m in matches:
+        parts = m.split(":", 2)
+        if len(parts) == 3:
+            fpath, lineno, content = parts
+            rel = (
+                Path(fpath).relative_to(ws) if Path(fpath).is_relative_to(ws) else fpath
+            )
+            lines.append(f"  📄 {rel}:{lineno}")
+            lines.append(f"     {content.strip()}")
+        else:
+            lines.append(f"  {m}")
+
+    return "\n".join(lines)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 

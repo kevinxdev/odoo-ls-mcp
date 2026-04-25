@@ -1,0 +1,16 @@
+Task 6: Odoo Helper Tools
+==========================
+Date: 2026-04-25
+
+Tools added to server.py:
+  - session_health()              — health/state report for all active sessions
+  - inspect_workspace_config()    — surfaces resolved odools.toml config
+  - lookup_model(workspace, model) — grep-based Odoo model definition finder
+  - lookup_xmlid(workspace, xmlid) — grep-based XML ID definition finder
+
+All four tools are read-only and workspace-scoped.
+
+Tests: tests/test_odoo_helpers.py — 16 tests, all passing
+
+Test run:
+  108 passed in 3.32s (full suite excl. integration)
