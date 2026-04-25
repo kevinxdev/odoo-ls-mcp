@@ -36,7 +36,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
+    "unit: fast unit tests that require no external processes",
     "integration: tests that require odoo_ls_server binary on PATH",
+    "e2e: end-to-end tests that spawn a real MCP server subprocess (slow)",
 ]
 testpaths = ["tests"]
 

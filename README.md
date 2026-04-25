@@ -95,6 +95,34 @@ uv run pytest
 uv run ruff check src tests
 ```
 
+## Testing
+
+The test suite uses three pytest markers:
+
+| Marker | Scope | Speed |
+|--------|-------|-------|
+| `unit` | Pure unit tests, no external processes | Fast (< 1 s each) |
+| `integration` | Requires `odoo_ls_server` binary on PATH | Medium |
+| `e2e` | Spawns a real MCP server subprocess | Slow (9–30 s per test) |
+
+**Run all tests (unit + integration + e2e — default):**
+```bash
+uv run pytest tests/ -q
+```
+
+**Run everything except e2e:**
+```bash
+uv run pytest tests/ -m "not e2e" -q
+```
+
+**Run e2e tests only:**
+```bash
+uv run pytest tests/ -m e2e -q
+```
+
+End-to-end tests require `odoo_ls_server` on PATH and the Odoo workspace at
+`/home/kevin/Development/Odoo/athenrix-docker-base` with a valid `odools.toml`.
+
 ## Notes
 
 - **stdout is never used** by this server — all logging goes to stderr.
