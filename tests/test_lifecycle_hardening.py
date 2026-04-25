@@ -93,6 +93,8 @@ async def test_concurrent_get_or_create_single_session(
     async def counting_start(self):
         nonlocal creation_count
         creation_count += 1
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
@@ -130,6 +132,8 @@ async def test_crash_recovery_creates_fresh_session(
     original_start = LspSession.start
 
     async def patched_start(self):
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
@@ -191,6 +195,8 @@ async def test_stale_config_triggers_restart(tmp_path: Path, fake_server_path: P
 
     async def tracking_start(self):
         nonlocal first_sess_created
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
         if first_sess_created is None:
@@ -214,6 +220,8 @@ async def test_stale_config_triggers_restart(tmp_path: Path, fake_server_path: P
 
     async def tracking_start2(self):
         nonlocal second_sess
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
         second_sess = self
@@ -238,6 +246,8 @@ async def test_stop_all_clears_all_sessions(tmp_path: Path, fake_server_path: Pa
     original_start = LspSession.start
 
     async def patched_start(self):
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 

@@ -306,17 +306,17 @@ async def test_registry_returns_same_session(tmp_path: Path, fake_server_path: P
 
     registry = SessionRegistry()
 
-    # Patch session creation to use fake server
     async def patched_get_or_create(ws: Path, cfg: Path | None = None) -> LspSession:
-        sess = LspSession(workspace=ws, binary=sys.executable)
+        sess = LspSession(workspace=ws, config_path=cfg, binary=sys.executable)
         sess._build_command = lambda: [sys.executable, str(fake_server_path)]
-        registry._sessions[registry._session_key(ws)] = sess
+        registry._sessions[registry._session_key(ws, cfg)] = sess
+        registry._config_mtimes[registry._session_key(ws, cfg)] = None
         await sess.start()
         return sess
 
-    with patch.object(registry, "get_or_create", side_effect=patched_get_or_create):
+    with patch.object(registry, "get_or_create", patched_get_or_create):
         s1 = await registry.get_or_create(workspace)
-        # Second call bypasses patched since session already in _sessions
+        # Second call returns cached session
         s2 = await registry.get(workspace)
 
     assert s1 is s2
@@ -329,10 +329,10 @@ async def test_registry_status(tmp_path: Path, fake_server_path: Path):
     workspace.mkdir()
 
     registry = SessionRegistry()
-    sess = LspSession(workspace=workspace, binary=sys.executable)
+    sess = LspSession(workspace=workspace, config_path=None, binary=sys.executable)
     sess._build_command = lambda: [sys.executable, str(fake_server_path)]
     await sess.start()
-    registry._sessions[registry._session_key(workspace)] = sess
+    registry._sessions[registry._session_key(workspace, None)] = sess
 
     status = registry.status()
     key = (str(workspace.resolve()), None)
@@ -357,6 +357,8 @@ async def test_registry_distinguishes_config_paths(
     original_start = LspSession.start
 
     async def patched_start(self: LspSession) -> None:
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
@@ -382,6 +384,8 @@ async def test_registry_evicts_idle_sessions(
     original_start = LspSession.start
 
     async def patched_start(self: LspSession) -> None:
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
@@ -409,6 +413,8 @@ async def test_registry_refreshes_last_used_on_get_or_create(
     original_start = LspSession.start
 
     async def patched_start(self: LspSession) -> None:
+        if self.binary is None:
+            self.binary = sys.executable
         self._build_command = lambda: [sys.executable, str(fake_server_path)]
         await original_start(self)
 
