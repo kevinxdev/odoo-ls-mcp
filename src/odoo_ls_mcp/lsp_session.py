@@ -394,6 +394,57 @@ class LspSession:
         # CompletionList
         return result.get("items", [])
 
+    async def find_references(
+        self,
+        path: Path,
+        line: int,
+        character: int,
+        include_declaration: bool = True,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> list[dict[str, Any]]:
+        await self._ensure_opened(path)
+        result = await self.request(
+            "textDocument/references",
+            {
+                "textDocument": {"uri": path.as_uri()},
+                "position": {"line": line, "character": character},
+                "context": {"includeDeclaration": include_declaration},
+            },
+            timeout=timeout,
+        )
+        if result is None:
+            return []
+        return result
+
+    async def document_symbols(
+        self,
+        path: Path,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> list[dict[str, Any]]:
+        await self._ensure_opened(path)
+        result = await self.request(
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": path.as_uri()}},
+            timeout=timeout,
+        )
+        if result is None:
+            return []
+        return result
+
+    async def workspace_symbols(
+        self,
+        query: str,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> list[dict[str, Any]]:
+        result = await self.request(
+            "workspace/symbol",
+            {"query": query},
+            timeout=timeout,
+        )
+        if result is None:
+            return []
+        return result
+
     def get_file_diagnostics(self, path: Path) -> list[Diagnostic]:
         """Return cached diagnostics for a specific file."""
         uri = path.as_uri()

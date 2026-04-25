@@ -1,0 +1,27 @@
+Task 5: Core Navigation Tools
+==============================
+Date: 2026-04-25
+
+Tools added to server.py:
+  - find_references(file, line, character, include_declaration)
+  - document_symbols(file)
+  - workspace_symbols(query)
+
+Methods added to lsp_session.py:
+  - find_references(uri, line, character, include_declaration)
+  - document_symbols(uri)
+  - workspace_symbols(query)
+
+Helpers added:
+  - _SYMBOL_KIND dict (LSP kind int → human name)
+  - _uri_to_path(uri) helper
+  - _fmt_symbols(symbols, source) helper
+  - _fmt_locations() updated with empty_msg param
+
+Tests: tests/test_navigation_tools.py — 16 tests, all passing
+
+Test run output:
+  16 passed in 0.85s
+
+Full suite (excluding integration):
+  92 passed in 3.21s

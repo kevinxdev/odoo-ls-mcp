@@ -74,18 +74,83 @@ def _fmt_hover(result: dict | None) -> str:
     return str(contents)
 
 
-def _fmt_locations(locations: list[dict]) -> str:
+_SYMBOL_KIND = {
+    1: "File",
+    2: "Module",
+    3: "Namespace",
+    4: "Package",
+    5: "Class",
+    6: "Method",
+    7: "Property",
+    8: "Field",
+    9: "Constructor",
+    10: "Enum",
+    11: "Interface",
+    12: "Function",
+    13: "Variable",
+    14: "Constant",
+    15: "String",
+    16: "Number",
+    17: "Boolean",
+    18: "Array",
+    19: "Object",
+    20: "Key",
+    21: "Null",
+    22: "EnumMember",
+    23: "Struct",
+    24: "Event",
+    25: "Operator",
+    26: "TypeParameter",
+}
+
+
+def _uri_to_path(uri: str) -> str:
+    return uri[7:] if uri.startswith("file://") else uri
+
+
+def _fmt_locations(locations: list[dict], empty_msg: str = "No results found.") -> str:
     if not locations:
-        return "No definition found at this position."
+        return empty_msg
     lines = [f"Found {len(locations)} location(s):"]
     for loc in locations:
         uri = loc.get("uri", "")
-        file_path = uri[7:] if uri.startswith("file://") else uri
+        file_path = _uri_to_path(uri)
         r = loc.get("range", {})
         start = r.get("start", {})
         line = start.get("line", 0) + 1
         char = start.get("character", 0) + 1
         lines.append(f"  📍 {file_path}:{line}:{char}")
+    return "\n".join(lines)
+
+
+def _fmt_symbols(symbols: list[dict], source: str = "") -> str:
+    if not symbols:
+        return f"No symbols found{' for: ' + source if source else ''}."
+    lines = [f"Found {len(symbols)} symbol(s){' for: ' + source if source else ''}:"]
+    for sym in symbols[:200]:
+        name = sym.get("name", "?")
+        kind_val = sym.get("kind", 0)
+        kind = _SYMBOL_KIND.get(kind_val, str(kind_val))
+        container = sym.get("containerName", "")
+        location = sym.get("location", {})
+        if not location:
+            loc_range = sym.get("range", sym.get("selectionRange", {}))
+            uri = sym.get("uri", "")
+            location = {"uri": uri, "range": loc_range}
+        uri = location.get("uri", "")
+        file_path = _uri_to_path(uri) if uri else ""
+        r = location.get("range", {})
+        start = r.get("start", {})
+        ln = start.get("line", 0) + 1
+        ch = start.get("character", 0) + 1
+        row = f"  • [{kind}] {name}"
+        if container:
+            row += f"  (in {container})"
+        if file_path:
+            row += f"  — {file_path}:{ln}:{ch}"
+        lines.append(row)
+    if len(symbols) > 200:
+        lines.append(f"  ... and {len(symbols) - 200} more")
     return "\n".join(lines)
 
 
@@ -546,7 +611,9 @@ async def go_to_definition(
 
     try:
         locations = await session.go_to_definition(fp, line, character, timeout=timeout)
-        return _fmt_locations(locations)
+        return _fmt_locations(
+            locations, empty_msg="No definition found at this position."
+        )
     except TimeoutError:
         return f"⏱️ Definition request timed out after {timeout}s."
     except RuntimeError as exc:
@@ -719,6 +786,147 @@ async def stop_session(
 
     await session.stop()
     return f"✅ Session stopped: {ws}"
+
+
+# ── Tool: find_references ─────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="find_references",
+    description=(
+        "Find all references to a symbol at a specific position in an Odoo source "
+        "file using the live OdooLS session. "
+        "Requires start_session to have been called first."
+    ),
+)
+async def find_references(
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
+    file_path: Annotated[str, Field(description="Absolute path to the source file.")],
+    line: Annotated[int, Field(description="0-based line number.", ge=0)],
+    character: Annotated[int, Field(description="0-based character offset.", ge=0)],
+    include_declaration: Annotated[
+        bool,
+        Field(default=True, description="Include the declaration in results."),
+    ] = True,
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
+) -> str:
+    ws = Path(workspace).resolve()
+    fp = Path(file_path).resolve()
+    registry = get_registry()
+    session = await registry.get(ws)
+
+    if session is None or not session.is_ready:
+        return "⚠️ No active session. Call start_session first."
+    if not fp.exists():
+        return f"❌ File not found: {fp}"
+
+    try:
+        locations = await session.find_references(
+            fp,
+            line,
+            character,
+            include_declaration=include_declaration,
+            timeout=timeout,
+        )
+        return _fmt_locations(
+            locations, empty_msg="No references found at this position."
+        )
+    except TimeoutError:
+        return f"⏱️ References request timed out after {timeout}s."
+    except RuntimeError as exc:
+        return f"❌ LSP error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("find_references tool error")
+        return f"❌ Unexpected error: {exc}"
+
+
+# ── Tool: document_symbols ────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="document_symbols",
+    description=(
+        "List all symbols (classes, methods, fields) in a specific Odoo source file "
+        "using the live OdooLS session. "
+        "Requires start_session to have been called first."
+    ),
+)
+async def document_symbols(
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
+    file_path: Annotated[str, Field(description="Absolute path to the source file.")],
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
+) -> str:
+    ws = Path(workspace).resolve()
+    fp = Path(file_path).resolve()
+    registry = get_registry()
+    session = await registry.get(ws)
+
+    if session is None or not session.is_ready:
+        return "⚠️ No active session. Call start_session first."
+    if not fp.exists():
+        return f"❌ File not found: {fp}"
+
+    try:
+        symbols = await session.document_symbols(fp, timeout=timeout)
+        return _fmt_symbols(symbols, source=str(fp))
+    except TimeoutError:
+        return f"⏱️ Document symbols request timed out after {timeout}s."
+    except RuntimeError as exc:
+        return f"❌ LSP error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("document_symbols tool error")
+        return f"❌ Unexpected error: {exc}"
+
+
+# ── Tool: workspace_symbols ───────────────────────────────────────────────────
+
+
+@mcp.tool(
+    name="workspace_symbols",
+    description=(
+        "Search for symbols matching a query string across the entire Odoo workspace "
+        "using the live OdooLS session. "
+        "Useful for finding model classes, field names, or XML-related identifiers. "
+        "Requires start_session to have been called first."
+    ),
+)
+async def workspace_symbols(
+    workspace: Annotated[
+        str, Field(description="Absolute path to the Odoo workspace root.")
+    ],
+    query: Annotated[
+        str,
+        Field(description="Symbol name or prefix to search for (empty string = all)."),
+    ],
+    timeout: Annotated[
+        float, Field(default=REQUEST_TIMEOUT, ge=1, le=60)
+    ] = REQUEST_TIMEOUT,
+) -> str:
+    ws = Path(workspace).resolve()
+    registry = get_registry()
+    session = await registry.get(ws)
+
+    if session is None or not session.is_ready:
+        return "⚠️ No active session. Call start_session first."
+
+    try:
+        symbols = await session.workspace_symbols(query, timeout=timeout)
+        return _fmt_symbols(symbols, source=repr(query))
+    except TimeoutError:
+        return f"⏱️ Workspace symbols request timed out after {timeout}s."
+    except RuntimeError as exc:
+        return f"❌ LSP error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("workspace_symbols tool error")
+        return f"❌ Unexpected error: {exc}"
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
